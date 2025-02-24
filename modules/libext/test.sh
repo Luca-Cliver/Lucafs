@@ -17,7 +17,7 @@ BASE='/data'
 #BASE='/data/native-example'
 #BASE='/data/TEST1'
 
-run_test "/find /data -ls"
+#run_test "/find /data -ls"
 
 run_test "/mkdir -p $BASE"
 

@@ -38,6 +38,9 @@ extern "C" bool is_linear_mapped(const void *addr);
 
 int ext_init(void) { return 0;}
 
+int luca_fs_init(struct ext4_fs *fs, struct ext4_blockdev *bdev,
+		 bool read_only);
+
 static int blockdev_open(struct ext4_blockdev *bdev)
 {
     return EOK;
@@ -139,7 +142,7 @@ static int
 ext_mount(struct mount *mp, const char *dev, int flags, const void *data)
 {
     struct device *device;
-
+    printf("设备名是%s\n", dev);
     const char *dev_name = dev + 5;
     ext_debug("Trying to open device: [%s]\n", dev_name);
     int error = device_open(dev_name, DO_RDWR, &device);
@@ -258,12 +261,80 @@ extern struct vfsops ext_vfsops;
 // Overwrite "null" vfsops structure fields with "real"
 // functions upon loading libext.so shared object
 void __attribute__((constructor)) initialize_vfsops() {
+    printf("进入initialize_vfsops\n");
     ext_vfsops.vfs_mount = ext_mount;
     ext_vfsops.vfs_unmount = ext_unmount;
     ext_vfsops.vfs_sync = ext_sync;
     ext_vfsops.vfs_vget = ((vfsop_vget_t)vfs_nullop);
     ext_vfsops.vfs_statfs = ext_statfs;
     ext_vfsops.vfs_vnops = &ext_vnops;
+}
+
+
+int luca_fs_init(struct ext4_fs *fs, struct ext4_blockdev *bdev,
+		 bool read_only)
+{
+    printf("luca_fs_init嘻嘻\n");
+	int r, i;
+	uint16_t tmp;
+	uint32_t bsize;
+
+	ext4_assert(fs && bdev);
+
+	fs->bdev = bdev;
+
+	fs->read_only = read_only;
+
+	r = ext4_sb_read(fs->bdev, &fs->sb);
+	if (r != EOK)
+		return r;
+
+	if (!ext4_sb_check(&fs->sb))
+		return ENOTSUP;
+
+	bsize = ext4_sb_get_block_size(&fs->sb);
+	if (bsize > EXT4_MAX_BLOCK_SIZE)
+		return ENXIO;
+
+	r = ext4_fs_check_features(fs, &read_only);
+	if (r != EOK)
+		return r;
+
+	if (read_only)
+		fs->read_only = read_only;
+
+	/* Compute limits for indirect block levels */
+	uint32_t blocks_id = bsize / sizeof(uint32_t);
+
+	fs->inode_block_limits[0] = EXT4_INODE_DIRECT_BLOCK_COUNT;
+	fs->inode_blocks_per_level[0] = 1;
+
+	for (i = 1; i < 4; i++) {
+		fs->inode_blocks_per_level[i] =
+		    fs->inode_blocks_per_level[i - 1] * blocks_id;
+		fs->inode_block_limits[i] = fs->inode_block_limits[i - 1] +
+					    fs->inode_blocks_per_level[i];
+	}
+
+	/*Validate FS*/
+	tmp = ext4_get16(&fs->sb, state);
+	if (tmp & EXT4_SUPERBLOCK_STATE_ERROR_FS)
+		ext4_dbg(DEBUG_FS, DBG_WARN
+				"last umount error: superblock fs_error flag\n");
+
+
+	if (!fs->read_only) {
+		/* Mark system as mounted */
+		ext4_set16(&fs->sb, state, EXT4_SUPERBLOCK_STATE_ERROR_FS);
+		r = ext4_sb_write(fs->bdev, &fs->sb);
+		if (r != EOK)
+			return r;
+
+		/*Update mount count*/
+		ext4_set16(&fs->sb, mount_count, ext4_get16(&fs->sb, mount_count) + 1);
+	}
+
+	return r;
 }
 
 asm(".pushsection .note.osv-mlock, \"a\"; .long 0, 0, 0; .popsection");

@@ -50,6 +50,7 @@ void free_contiguous_aligned(void* p);
 #include <cstddef>
 
 #include <algorithm>
+#include <stdio.h>
 
 //#define CONF_debug_ext 1
 #if CONF_debug_ext
@@ -286,7 +287,7 @@ ext_read(vnode_t *vp, struct file *fp, uio_t *uio, int ioflag)
 static int
 ext_internal_write(struct ext4_fs *fs, struct ext4_inode_ref *ref, uint64_t offset, void *buf, size_t size, size_t *wcnt)
 {
-    ext_debug("[ext4_internal_write] Writing %ld bytes at offset:%ld\n", size, offset);
+    printf("[ext4_internal_write] Writing %ld bytes at offset:%ld\n", size, offset);
     ext4_fsblk_t fblock;
     ext4_fsblk_t fblock_start = 0;
 
@@ -477,7 +478,7 @@ static int
 ext_write(vnode_t *vp, uio_t *uio, int ioflag)
 {
     ext_debug("Writing %ld bytes at offset:%ld to file i-node:%ld\n", uio->uio_resid, uio->uio_offset, vp->v_ino);
-
+    //printf("ext_write测试\n");
     /* Cant write directories */
     if (vp->v_type == VDIR)
         return EISDIR;
@@ -613,6 +614,7 @@ ext_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
 static int
 ext_lookup(struct vnode *dvp, char *nm, struct vnode **vpp)
 {
+    kprintf("[ext4] Looking up %s in directory with i-node:%ld\n", nm, dvp->v_ino);
     ext_debug("Looking up %s in directory with i-node:%ld\n", nm, dvp->v_ino);
     struct ext4_fs *fs = (struct ext4_fs *)dvp->v_mount->m_data;
 
@@ -1091,7 +1093,7 @@ ext_rmdir(vnode_t *dvp, vnode_t *vp, char *name)
 static int
 ext_getattr(vnode_t *vp, vattr_t *vap)
 {
-    ext_debug("Getting attributes at i-node:%ld\n", vp->v_ino);
+    kprintf("Getting attributes at i-node:%ld\n", vp->v_ino);
     struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
 
     auto_inode_ref inode_ref(fs, vp->v_ino);
