@@ -8,7 +8,7 @@ CXXFLAGS = -fPIC -std=gnu++11 $(INCLUDES) -I../lwext4/upstream/lwext4/include -I
 
 # the build target executable:
 TARGET = liblucafs
-CPP_FILES := luca_vfsops.cc luca_vnops.cc
+CPP_FILES := luca_vfsops.cc luca_vnops.cc lucafs.cc luca_extent.cc
 OBJ_FILES := $(addprefix $(module_out)/,$(CPP_FILES:.cc=.o))
 DEPS := $(OBJ_FILES:.o=.d)
 

@@ -41,11 +41,13 @@ struct auto_inode_ref {
     int _r;
 
     auto_inode_ref(luca_fs_t *fs, uint32_t inode_no) {
-        _r = ext4_fs_get_inode_ref(fs, inode_no, &_ref);
+        kprintf("[lucafs] auto_inode_ref called for inode %d\n", inode_no);
+        // _r = luca_fs_get_inode_ref(fs, inode_no, &_ref, true);
+        _r = luca_fs_get_inode_ref(fs, inode_no, &_ref);
     }
     ~auto_inode_ref() {
         if (_r == EOK) {
-            ext4_fs_put_inode_ref(&_ref);
+            luca_fs_put_inode_ref(&_ref);
         }
     }
 };
@@ -58,13 +60,13 @@ struct auto_write_back {
     //struct ext4_fs *_fs;
     luca_fs_t *_fs;
 
-    auto_write_back(struct ext4_fs *fs) {
+    auto_write_back(luca_fs_t *fs) {
         _fs = fs;
-        ext4_block_cache_write_back(_fs->bdev, 1);
+        luca_block_cache_write_back(_fs->bdev, 1);
     }
 
     ~auto_write_back() {
-        ext4_block_cache_write_back(_fs->bdev, 0);
+        luca_block_cache_write_back(_fs->bdev, 0);
     }
 };
 
@@ -110,7 +112,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
     if(rcnt)
         *rcnt = 0;
 
-    uint64_t fsize = ext4_inode_get_size(sb, ref->inode);
+    uint64_t fsize = luca_inode_get_size(sb, ref->inode);
     uint32_t block_size = ext4_sb_get_block_size(sb);
 
     size = ((uint64_t)size > (fsize-offset)) ? ((size_t)(fsize-offset)) : size;
@@ -127,7 +129,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
         /*如果size小于第一个块剩余的部分，直接读取size，否则读出第一个块剩余的部分*/
         size_t len = size > (block_size - unalg) ? (block_size - unalg) : size;
 
-        r = ext4_fs_get_inode_dblk_idx(ref, block_index, &fblock, true);
+        r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
         if(r != EOK)
             return r;
 
@@ -136,7 +138,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
         {   /*fblock不为零说明是写入的块*/
             uint64_t off = fblock * block_size + unalg;
             /*lwext中提供的和底层交互的接口*/
-            r = ext4_block_readbytes(fs->bdev, off, u8_buf, len);
+            r = luca_block_readbytes(fs->bdev, off, u8_buf, len);
             if(r != EOK)
                 return r;
         }
@@ -160,7 +162,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
     {/*读中间的完整块*/
         while(block_index < block_final)
         {/*连续的块一起处理一起读*/
-            r = ext4_fs_get_inode_dblk_idx(ref, block_index, &fblock, true);
+            r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
 
             if(r != EOK)
                 return r;
@@ -177,7 +179,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
         }
         
         kprintf("[luca_internal_read] block_start:%ld, block_count:%d\n", block_start, block_count);
-        r = ext4_blocks_get_direct(fs->bdev, u8_buf, block_start, block_count);
+        r = luca_blocks_get_direct(fs->bdev, u8_buf, block_start, block_count);
 
         if(r != EOK)
             return r;
@@ -196,12 +198,12 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
 
     if(size)
     {/*最后一个块剩余的一部分*/
-        r = ext4_fs_get_inode_dblk_idx(ref, block_index, &fblock, true);
+        r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
         if(r != EOK)
             return r;
 
         uint64_t off = fblock * block_size;
-        r = ext4_block_readbytes(fs->bdev, off, u8_buf, size);
+        r = luca_block_readbytes(fs->bdev, off, u8_buf, size);
         if(r != EOK)
             return r;
 
@@ -241,7 +243,7 @@ static int luca_read(struct vnode *vp, struct file *fp, struct uio *uio, int iof
         return inode_ref._r;
     }
 
-    uint64_t file_size = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
+    uint64_t file_size = luca_inode_get_size(&fs->sb, inode_ref._ref.inode);
     uint64_t read_size = (file_size - uio->uio_offset) > (uint64_t)uio->uio_resid ? (uint64_t)uio->uio_resid : (file_size - uio->uio_offset);
     void *buffer = alloc_contiguous_aligned(read_size, alignof(std::max_align_t));
 
@@ -278,7 +280,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
     if(wcnt)
         *wcnt = 0;
 
-    uint64_t fsize = ext4_inode_get_size(sb, ref->inode);
+    uint64_t fsize = luca_inode_get_size(sb, ref->inode);
     uint32_t block_size = ext4_sb_get_block_size(sb);
 
     uint32_t block_index = (uint32_t)(offset / block_size);   //第一个块的索引
@@ -300,11 +302,13 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
 
         if(block_index <  file_blocks)
         {
-            r = ext4_fs_init_inode_dblk_idx(ref, block_index, &fblock);
+            //r = ext4_fs_init_inode_dblk_idx(ref, block_index, &fblock);
+            r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock,
+						   true, true);
         }
         else
         {
-            r = ext4_fs_append_inode_dblk(ref, &fblock, &block_index);
+            r = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
             kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
             file_blocks++;
         }
@@ -312,7 +316,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
             goto Finish;
 
         off = fblock * block_size + unalg;
-        r = ext4_block_writebytes(fs->bdev, off, u8_buf, len);
+        r = luca_block_writebytes(fs->bdev, off, u8_buf, len);
         if(r != EOK)
             goto Finish;
 
@@ -327,7 +331,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
     }
 
     /*开启写回cache*/
-    r = ext4_block_cache_write_back(fs->bdev, 1);
+    r = luca_block_cache_write_back(fs->bdev, 1);
     if(r != EOK)
         goto Finish;
 
@@ -335,7 +339,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
     while(file_blocks < block_index)
     {
         uint32_t block_index_;
-        r = ext4_fs_append_inode_dblk(ref, nullptr, &block_index_);
+        r = luca_fs_append_inode_dblk(ref, nullptr, &block_index_);
         if(r != EOK)
         {
             offset = file_blocks * block_size;
@@ -351,13 +355,13 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
         {  /*连续的快一起写*/
             if(block_index < block_final)
             {
-                r = ext4_fs_init_inode_dblk_idx(ref, block_index, &fblock);
+                r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, true, true);
                 if(r != EOK)
                     goto Finish;
             }
             else
             {
-                rr = ext4_fs_append_inode_dblk(ref, &fblock, &block_index);
+                rr = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
                 kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
                 if(rr != EOK)
                     break;
@@ -374,7 +378,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
             block_count++;
         }
 
-        r = ext4_blocks_set_direct(fs->bdev, u8_buf, block_start, block_count);
+        r = luca_blocks_set_direct(fs->bdev, u8_buf, block_start, block_count);
         kprintf("[luca_internal_write] Wrote direct %d blocks at block %ld\n", block_count, block_start);
         if(r != EOK)
             break;
@@ -397,7 +401,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
     }
 
     /*关闭写回cache*/
-    ext4_block_cache_write_back(fs->bdev, 0);
+    luca_block_cache_write_back(fs->bdev, 0);
 
     if(r != EOK)
         goto Finish;
@@ -407,20 +411,20 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
         uint64_t off;
         if(block_index < block_final)
         {
-            r = ext4_fs_init_inode_dblk_idx(ref, block_index, &fblock);
+            r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, true, true);
             if(r != EOK)
                 goto Finish;
         }
         else
         {
-            r = ext4_fs_append_inode_dblk(ref, &fblock, &block_index);
+            r = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
             kprintf("[luca_internal_write] Appended (4) block=%d, phys:%ld\n", block_index, fblock);
             if(r != EOK)
                 goto overflow;
         }
 
         off = fblock * block_size;
-        r = ext4_block_writebytes(fs->bdev, off, u8_buf, size);
+        r = luca_block_writebytes(fs->bdev, off, u8_buf, size);
         if(r != EOK)
             goto Finish;
 
@@ -434,7 +438,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
 overflow:
     if(offset > fsize)
     {
-        ext4_inode_set_size(ref->inode, offset);
+        luca_inode_set_size(ref->inode, offset);
         ref->dirty = true;
     }
 
@@ -442,8 +446,10 @@ overflow:
 Finish:
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    ext4_inode_set_change_inode_time(ref->inode, ts.tv_sec);
-    ext4_inode_set_modif_time(ref->inode, ts.tv_sec);
+    // ext4_inode_set_change_inode_time(ref->inode, ts.tv_sec);
+    // ext4_inode_set_modif_time(ref->inode, ts.tv_sec);
+    ref->inode->change_inode_time = to_le32(ts.tv_sec);
+    ref->inode->modification_time = to_le32(ts.tv_sec);
     ref->dirty = true;
 
     return r;
@@ -479,7 +485,7 @@ static int luca_wirte(vnode_t *vp, uio_t *uio, int ioflag)
 
     uio_t uio__ = *uio;
     if (ioflag & IO_APPEND) {
-        uio__.uio_offset = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
+        uio__.uio_offset = luca_inode_get_size(&fs->sb, inode_ref._ref.inode);
     }
 
     void *buffer = alloc_contiguous_aligned(uio->uio_resid, alignof(std::max_align_t));
@@ -525,27 +531,33 @@ static int luca_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
         return ENOENT;
     }
 
-    int r = ext4_fs_get_inode_ref(fs, dvp->v_ino, &inode_ref);
+    // int r = luca_fs_get_inode_ref(fs, dvp->v_ino, &inode_ref, true);
+    int r = luca_fs_get_inode_ref(fs, dvp->v_ino, &inode_ref);
     if(r != EOK)
     {
         return r;
     }
 
     /*检查是否是目录*/
-    if(ext4_inode_is_type(&fs->sb, inode_ref.inode, EXT4_INODE_MODE_DIRECTORY) == 0)
+    // if(ext4_inode_is_type(&fs->sb, inode_ref.inode, EXT4_INODE_MODE_DIRECTORY) == 0)
+    // {
+    //     ext4_fs_put_inode_ref(&inode_ref);
+    //     return ENOTDIR;
+    // }
+    if(luca_inode_type(&fs->sb, inode_ref.inode) != LUCA_INODE_MODE_DIRECTORY)
     {
-        ext4_fs_put_inode_ref(&inode_ref);
+        luca_fs_put_inode_ref(&inode_ref);
         return ENOTDIR;
     }
 
     kprintf("[lucafs] readdir called for inode %ld\n", dvp->v_ino);
     /*目录迭代器*/
-    struct ext4_dir_iter it;
-    int rc = ext4_dir_iterator_init(&it, &inode_ref, file_offset(fp));
+    struct luca_dir_iter it;
+    int rc = luca_dir_iterator_init(&it, &inode_ref, file_offset(fp));
     if(rc != EOK)
     {
         kprintf("[lucafs] Reading directory with i-node:%ld at offset:%ld -> FAILED to init iterator\n", dvp->v_ino, file_offset(fp));
-        ext4_fs_put_inode_ref(&inode_ref);
+        luca_fs_put_inode_ref(&inode_ref);
         return rc;
     }
 
@@ -570,7 +582,7 @@ static int luca_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
             else if(i_type == LUCA_DE_SYMLINK)
                 dir->d_type = DT_LNK;
 
-            ext4_dir_iterator_next(&it);
+            luca_dir_iterator_next(&it);
 
             off_t off = file_offset(fp);
             dir->d_fileno = off;
@@ -584,14 +596,14 @@ static int luca_readdir(struct vnode *dvp, struct file *fp, struct dirent *dir)
     }
     else
     {
-        ext4_dir_iterator_fini(&it);
-        ext4_fs_put_inode_ref(&inode_ref);
+        luca_dir_iterator_fini(&it);
+        luca_fs_put_inode_ref(&inode_ref);
         kprintf("[lucafs] Reading directory with i-node:%ld at offset:%ld -> ENOENT\n", dvp->v_ino, file_offset(fp));
         return ENOENT;
     }
 
-    rc = ext4_dir_iterator_fini(&it);
-    ext4_fs_put_inode_ref(&inode_ref);
+    rc = luca_dir_iterator_fini(&it);
+    luca_fs_put_inode_ref(&inode_ref);
     if(rc != EOK)
         return rc;
 
@@ -609,14 +621,19 @@ static int luca_lookup(struct vnode *dvp, char *name, struct vnode **vpp)
         return inode_ref._r;
     }
 
-    /*检查是不是目录*/
-    if(ext4_inode_is_type(&fs->sb, inode_ref._ref.inode, EXT4_INODE_MODE_DIRECTORY) == 0)
+    // /*检查是不是目录*/
+    // if(ext4_inode_is_type(&fs->sb, inode_ref._ref.inode, EXT4_INODE_MODE_DIRECTORY) == 0)
+    // {
+    //     return ENOTDIR;
+    // }
+
+    if(luca_inode_type(&fs->sb, inode_ref._ref.inode) != LUCA_INODE_MODE_DIRECTORY)
     {
         return ENOTDIR;
     }
 
-    struct ext4_dir_search_result result;
-    int r = ext4_dir_find_entry(&result, &inode_ref._ref, name, strlen(name));
+    struct luca_dir_search_result result;
+    int r = luca_dir_find_entry(&result, &inode_ref._ref, name, strlen(name));
     if(r == EOK)
     {
         uint32_t inode_num = ext4_dir_en_get_inode(result.dentry);
@@ -627,7 +644,7 @@ static int luca_lookup(struct vnode *dvp, char *name, struct vnode **vpp)
             return inode_ref_._r;
         }
 
-        uint32_t inode_type = ext4_inode_type(&fs->sb, inode_ref_._ref.inode);
+        uint32_t inode_type = luca_inode_type(&fs->sb, inode_ref_._ref.inode);
         if (inode_type == LUCA_INODE_MODE_DIRECTORY) {
             (*vpp)->v_type = VDIR;
         } else if (inode_type == LUCA_INODE_MODE_FILE) {
@@ -636,14 +653,15 @@ static int luca_lookup(struct vnode *dvp, char *name, struct vnode **vpp)
             (*vpp)->v_type = VLNK;
         }
 
-        (*vpp)->v_mode = ext4_inode_get_mode(&fs->sb, inode_ref_._ref.inode);
+        (*vpp)->v_mode = to_le16(inode_ref._ref.inode->mode);
+        //ext4_inode_get_mode(&fs->sb, inode_ref_._ref.inode);
     }
     else
     {
         r = ENOENT;
     }
 
-    ext4_dir_destroy_result(&inode_ref._ref, &result);
+    luca_dir_destroy_result(&inode_ref._ref, &result);
 
     return r;
 }
@@ -655,30 +673,31 @@ static int luca_dir_initialize(luca_inode_ref_t *parent, luca_inode_ref_t *child
 #if CONFIG_DIR_INDEX_ENABLE
     if(dir_index_on)
     {
-        r =ext4_dir_dx_init(parent, child);
+        r = luca_dir_dx_init(parent, child);
         if(r != EOK)
             return r;
 
-        ext4_inode_set_flag(child->inode, 0x00001000);
+        luca_inode_set_flag(child->inode, 0x00001000);
     }
     else
 #endif
     {
-        r = ext4_dir_add_entry(child, ".", 1, child);
+        r = luca_dir_add_entry(child, ".", 1, child);
         if(r != EOK)
             return r;
 
-        r = ext4_dir_add_entry(child, "..", 2, parent);
+        r = luca_dir_add_entry(child, "..", 2, parent);
         if(r != EOK)
         {
-            ext4_dir_remove_entry(child, ".", 1);
+            luca_dir_remove_entry(child, ".", 1);
             return r;
         }
     }
 
     /*新目录有两个链接：.和..*/
-    ext4_inode_set_links_cnt(child->inode, 2);
-    ext4_fs_inode_links_count_inc(parent);
+    // ext4_inode_set_links_cnt(child->inode, 2);
+    child->inode->links_count = 2;
+    luca_fs_inode_links_count_inc(parent);
     parent->dirty = true;
     child->dirty = true;
 
@@ -696,14 +715,19 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
     }
 
     /*检查是否是目录*/
-    if(ext4_inode_is_type(&fs->sb, inode_ref._ref.inode, LUCA_INODE_MODE_DIRECTORY) == 0)
+    // if(ext4_inode_is_type(&fs->sb, inode_ref._ref.inode, LUCA_INODE_MODE_DIRECTORY) == 0)
+    // {
+    //     return ENOTDIR;
+    // }
+
+    if(luca_inode_type(&fs->sb, inode_ref._ref.inode) != LUCA_INODE_MODE_DIRECTORY)
     {
         return ENOTDIR;
     }
 
-    struct ext4_dir_search_result result;
-    int r = ext4_dir_find_entry(&result, &inode_ref._ref, name, strlen(name));
-    ext4_dir_destroy_result(&inode_ref._ref, &result);
+    struct luca_dir_search_result result;
+    int r = luca_dir_find_entry(&result, &inode_ref._ref, name, strlen(name));
+    luca_dir_destroy_result(&inode_ref._ref, &result);
 
     if(r == EOK)
     {
@@ -712,20 +736,21 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
 
     luca_inode_ref_t child;
     if(link_no)
-        r = ext4_fs_get_inode_ref(fs, *link_no, &child);
+        r = luca_fs_get_inode_ref(fs, *link_no, &child);
+        // r = luca_fs_get_inode_ref(fs, *link_no, &child, true);
     else
-        r = ext4_fs_alloc_inode(fs, &child, type);
+        r = luca_fs_alloc_inode(fs, &child, type);
 
     if(r != EOK)
         return r;
 
     if(!link_no)
-        ext4_fs_inode_blocks_init(fs, &child);
+        luca_fs_inode_blocks_init(fs, &child);
 
-    r = ext4_dir_add_entry(&inode_ref._ref, name, strlen(name), &child);
+    r = luca_dir_add_entry(&inode_ref._ref, name, strlen(name), &child);
     if(r == EOK)
     {
-        bool is_dir = ext4_inode_is_type(&fs->sb, child.inode, LUCA_INODE_MODE_DIRECTORY);
+        bool is_dir = (luca_inode_type(&fs->sb, child.inode) == LUCA_INODE_MODE_DIRECTORY);
 
         if(is_dir && link_no)
         {
@@ -741,12 +766,12 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
             r = luca_dir_initialize(&inode_ref._ref, &child, dir_index_on);
             if(r != EOK)
             {
-                ext4_dir_remove_entry(&inode_ref._ref, name, strlen(name));
+                luca_dir_remove_entry(&inode_ref._ref, name, strlen(name));
             }
         }
         else
         {
-            ext4_fs_inode_links_count_inc(&child);
+            luca_fs_inode_links_count_inc(&child);
         }
     }
 
@@ -754,15 +779,20 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
     {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ext4_inode_set_change_inode_time(child.inode, ts.tv_sec);
+        // ext4_inode_set_change_inode_time(child.inode, ts.tv_sec);
+        child.inode->change_inode_time = to_le32(ts.tv_sec);
         if(!link_no)
         {
-            ext4_inode_set_access_time(child.inode, ts.tv_sec);
-            ext4_inode_set_modif_time(child.inode, ts.tv_sec);
+            // ext4_inode_set_access_time(child.inode, ts.tv_sec);
+            // ext4_inode_set_modif_time(child.inode, ts.tv_sec);
+            child.inode->access_time = to_le32(ts.tv_sec);
+            child.inode->modification_time = to_le32(ts.tv_sec);
         }
 
-        ext4_inode_set_change_inode_time(inode_ref._ref.inode, ts.tv_sec);
-        ext4_inode_set_modif_time(inode_ref._ref.inode, ts.tv_sec);
+        // ext4_inode_set_change_inode_time(inode_ref._ref.inode, ts.tv_sec);
+        // ext4_inode_set_modif_time(inode_ref._ref.inode, ts.tv_sec);
+        inode_ref._ref.inode->change_inode_time = to_le32(ts.tv_sec);
+        inode_ref._ref.inode->modification_time = to_le32(ts.tv_sec);
 
         inode_ref._ref.dirty = true;
         child.dirty = true;
@@ -774,12 +804,12 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
     else
     {
         if(!link_no)
-            ext4_fs_free_inode(&child);
+            luca_fs_free_inode(&child);
         
         child.dirty = false;
     }
 
-    ext4_fs_put_inode_ref(&child);
+    luca_fs_put_inode_ref(&child);
 
     return r;
 
@@ -803,12 +833,12 @@ static int luca_trunc_inode(luca_fs_t *fs, uint32_t index, uint64_t new_size)
 {
     kprintf("[lucafs] trunc_inode\n");
     luca_inode_ref_t inode_ref;
-    int r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
+    int r = luca_fs_get_inode_ref(fs, index, &inode_ref);
     if(r != EOK)
         return r;
 
-    uint64_t inode_size = ext4_inode_get_size(&fs->sb, inode_ref.inode);
-    ext4_fs_put_inode_ref(&inode_ref);
+    uint64_t inode_size = luca_inode_get_size(&fs->sb, inode_ref.inode);
+    luca_fs_put_inode_ref(&inode_ref);
 
     if(inode_size > new_size)
     {
@@ -816,18 +846,18 @@ static int luca_trunc_inode(luca_fs_t *fs, uint32_t index, uint64_t new_size)
         {/*每次截断最大能截断的长度*/
             inode_size = inode_size - CONFIG_MAX_TRUNCATE_SIZE;
 
-            r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
+            r = luca_fs_get_inode_ref(fs, index, &inode_ref);
             if(r != EOK)
                 break;
 
-            r = ext4_fs_truncate_inode(&inode_ref, inode_size);
+            r = luca_fs_truncate_inode(&inode_ref, inode_size);
             if(r != EOK)
             {
-                ext4_fs_put_inode_ref(&inode_ref);
+                luca_fs_put_inode_ref(&inode_ref);
                 goto Finish;
             }
             
-            r = ext4_fs_put_inode_ref(&inode_ref);
+            r = luca_fs_put_inode_ref(&inode_ref);
             if(r != EOK)
                 goto Finish; 
         }
@@ -835,15 +865,15 @@ static int luca_trunc_inode(luca_fs_t *fs, uint32_t index, uint64_t new_size)
         {/*处理剩余的部分*/
             inode_size = new_size;
 
-            r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
+            r = luca_fs_get_inode_ref(fs, index, &inode_ref);
             if(r != EOK)
                 goto Finish;
 
-            r = ext4_fs_truncate_inode(&inode_ref, inode_size);
+            r = luca_fs_truncate_inode(&inode_ref, inode_size);
             if(r != EOK)
-                ext4_fs_put_inode_ref(&inode_ref);
+                luca_fs_put_inode_ref(&inode_ref);
             else
-                r = ext4_fs_put_inode_ref(&inode_ref);
+                r = luca_fs_put_inode_ref(&inode_ref);
         }
     }
 
@@ -862,7 +892,7 @@ static int luca_dir_trunc(luca_fs_t *fs, luca_inode_ref_t *parent, luca_inode_re
     /*初始化目录索引*/
     if(ext4_sb_feature_com(&fs->sb, EXT4_FCOM_DIR_INDEX))
     {
-        r = ext4_dir_dx_init(dir, parent);
+        r = luca_dir_dx_init(dir, parent);
         if(r != EOK)
             return r;
 
@@ -878,10 +908,9 @@ static int luca_dir_trunc(luca_fs_t *fs, luca_inode_ref_t *parent, luca_inode_re
             return r;
     }
 
-    return ext4_fs_truncate_inode(dir, 0);
+    return luca_fs_truncate_inode(dir, 0);
 
 
-    return (EOK);
 }
 
 
@@ -907,7 +936,7 @@ static int luca_remove(struct vnode *dvp, struct vnode *vp, char *name)
         return child_ref._r;
 
     int r = EOK;
-    uint32_t type = ext4_inode_type(&fs->sb, child_ref._ref.inode);
+    uint32_t type = luca_inode_type(&fs->sb, child_ref._ref.inode);
     if(type == LUCA_INODE_MODE_DIRECTORY)
     {
         r = luca_dir_trunc(fs, &parent_ref._ref, &child_ref._ref);
@@ -916,7 +945,8 @@ static int luca_remove(struct vnode *dvp, struct vnode *vp, char *name)
     }
     else
     {
-        if(ext4_inode_get_links_cnt(child_ref._ref.inode) == 1)
+        if(/*ext4_inode_get_links_cnt(child_ref._ref.inode)*/
+            to_le16(child_ref._ref.inode->links_count) == 1)
         {
             r = luca_trunc_inode(fs, child_ref._ref.index, 0);
             if(r != EOK)
@@ -926,23 +956,24 @@ static int luca_remove(struct vnode *dvp, struct vnode *vp, char *name)
     }
 
     /*在父目录中删除这个节点*/
-    r = ext4_dir_remove_entry(&parent_ref._ref, name, strlen(name));
+    r = luca_dir_remove_entry(&parent_ref._ref, name, strlen(name));
     if(r != EOK)
         return r;
 
     if(type == LUCA_INODE_MODE_DIRECTORY)
-        ext4_fs_free_inode(&child_ref._ref);
+        luca_fs_free_inode(&child_ref._ref);
     else
     {
-        int links_count = ext4_inode_get_links_cnt(child_ref._ref.inode);
+        int links_count = to_le16(child_ref._ref.inode->links_count);
+        // ext4_inode_get_links_cnt(child_ref._ref.inode);
         if(links_count)
         {
-            ext4_fs_inode_links_count_dec(&child_ref._ref);
+            luca_fs_inode_links_count_dec(&child_ref._ref);
             child_ref._ref.dirty = true;
 
             if(links_count == 1)
             {/*原本是1，现在就是0*/
-                ext4_fs_free_inode(&child_ref._ref);
+                luca_fs_free_inode(&child_ref._ref);
             }
         }
     }
@@ -951,8 +982,11 @@ static int luca_remove(struct vnode *dvp, struct vnode *vp, char *name)
     {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ext4_inode_set_change_inode_time(parent_ref._ref.inode, ts.tv_sec);
-        ext4_inode_set_modif_time(parent_ref._ref.inode, ts.tv_sec);
+        // ext4_inode_set_change_inode_time(parent_ref._ref.inode, ts.tv_sec);
+        // ext4_inode_set_modif_time(parent_ref._ref.inode, ts.tv_sec);
+        parent_ref._ref.inode->change_inode_time = to_le32(ts.tv_sec);
+        parent_ref._ref.inode->modification_time = to_le32(ts.tv_sec);
+
         parent_ref._ref.dirty = true;
     }
     return r;
@@ -974,7 +1008,7 @@ static int luca_rename(struct vnode *oldplace_vp, struct vnode *old_vp, char *ol
             return target_dir._r;
 
         //从目标目录中移除
-        r = ext4_dir_remove_entry(&target_dir._ref, new_name, strlen(new_name));
+        r = luca_dir_remove_entry(&target_dir._ref, new_name, strlen(new_name));
         if(r != EOK)
             return r;
     }
@@ -990,7 +1024,7 @@ static int luca_rename(struct vnode *oldplace_vp, struct vnode *old_vp, char *ol
     if(oldplace_vp == newplace_vp)
     {/*新旧位置是同一个*/
         //直接把在同样的目录下添加一个新的名字
-        r = ext4_dir_add_entry(&old_dir._ref, new_name, strlen(new_name), &old_file._ref);
+        r = luca_dir_add_entry(&old_dir._ref, new_name, strlen(new_name), &old_file._ref);
         if(r != EOK)
             return r;
 
@@ -1001,46 +1035,50 @@ static int luca_rename(struct vnode *oldplace_vp, struct vnode *old_vp, char *ol
         if(new_dir._r != EOK)
             return new_dir._r;
 
-        r = ext4_dir_add_entry(&new_dir._ref, new_name, strlen(new_name), &old_file._ref);
+        r = luca_dir_add_entry(&new_dir._ref, new_name, strlen(new_name), &old_file._ref);
         if(r != EOK)
             return r;
     
     }
 
     /*改名的是目录，那也需要把父目录“..”重定位一下*/
-    if(ext4_inode_is_type(&fs->sb, old_file._ref.inode, LUCA_INODE_MODE_DIRECTORY))
+    if(/*ext4_inode_is_type(&fs->sb, old_file._ref.inode, LUCA_INODE_MODE_DIRECTORY)*/
+       luca_inode_type(&fs->sb, old_file._ref.inode) == LUCA_INODE_MODE_DIRECTORY)
     {
         auto_inode_ref new_dir(fs, newplace_vp->v_ino);
         if(new_dir._r != EOK)
             return new_dir._r;
 
-        struct ext4_dir_search_result result;
-        if(ext4_inode_has_flag(old_file._ref.inode, 0x00001000))
+        struct luca_dir_search_result result;
+        if(/*ext4_inode_has_flag(old_file._ref.inode, 0x00001000)*/
+            to_le32(old_file._ref.inode->flags) & 0x00001000)
         {
 #if CONFIG_DIR_INDEX_ENABLE
-        r = ext4_dir_dx_reset_parent_inode(&old_file._ref, new_dir._ref.index);
+        r = luca_dir_dx_reset_parent_inode(&old_file._ref, new_dir._ref.index);
         if(r != EOK)
             return r;      
 #endif
         }
         else
         {
-            r = ext4_dir_find_entry(&result, &old_file._ref, "..", 2);
+            r = luca_dir_find_entry(&result, &old_file._ref, "..", 2);
             if(r != EOK)
                 return EIO;
 
             ext4_dir_en_set_inode(result.dentry, new_dir._ref.index);
-            ext4_trans_set_block_dirty(result.block.buf);
-            r = ext4_dir_destroy_result(&old_file._ref, &result);
+            // ext4_trans_set_block_dirty(result.block.buf);
+            luca_bcache_set_dirty(result.block.buf);
+
+            r = luca_dir_destroy_result(&old_file._ref, &result);
             if(r != EOK)
                 return r;
         }
 
-        ext4_fs_inode_links_count_inc(&new_dir._ref);
+        luca_fs_inode_links_count_inc(&new_dir._ref);
     }
 
     /*从旧目录中移除源文件*/
-    r = ext4_dir_remove_entry(&old_dir._ref, old_name, strlen(old_name));
+    r = luca_dir_remove_entry(&old_dir._ref, old_name, strlen(old_name));
     if(r != EOK)
         return r;
 
@@ -1080,8 +1118,9 @@ static int luca_getattr(vnode_t *vp, vattr_t *vap)
         return inode_ref._r;
     }
 
-    vap->va_mode = ext4_inode_get_mode(&fs->sb, inode_ref._ref.inode);
-    uint32_t type = ext4_inode_type(&fs->sb, inode_ref._ref.inode);
+    vap->va_mode = to_le16(inode_ref._ref.inode->mode);
+    // ext4_inode_get_mode(&fs->sb, inode_ref._ref.inode);
+    uint32_t type = luca_inode_type(&fs->sb, inode_ref._ref.inode);
     if (type == LUCA_INODE_MODE_DIRECTORY) {
         vap->va_type = VDIR;
     } else if (type == LUCA_INODE_MODE_FILE) {
@@ -1091,11 +1130,15 @@ static int luca_getattr(vnode_t *vp, vattr_t *vap)
     }
 
     vap->va_nodeid = vp->v_ino;
-    vap->va_size = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
+    vap->va_size = luca_inode_get_size(&fs->sb, inode_ref._ref.inode);
 
-    vap->va_atime.tv_sec = ext4_inode_get_access_time(inode_ref._ref.inode);
-    vap->va_mtime.tv_sec = ext4_inode_get_modif_time(inode_ref._ref.inode);
-    vap->va_ctime.tv_sec = ext4_inode_get_change_inode_time(inode_ref._ref.inode);
+    // vap->va_atime.tv_sec = ext4_inode_get_access_time(inode_ref._ref.inode);
+    // vap->va_mtime.tv_sec = ext4_inode_get_modif_time(inode_ref._ref.inode);
+    // vap->va_ctime.tv_sec = ext4_inode_get_change_inode_time(inode_ref._ref.inode);
+
+    vap->va_atime.tv_sec = to_le32(inode_ref._ref.inode->access_time);
+    vap->va_mtime.tv_sec = to_le32(inode_ref._ref.inode->modification_time);
+    vap->va_ctime.tv_sec = to_le32(inode_ref._ref.inode->change_inode_time);
 
     return (EOK);
 }
@@ -1114,25 +1157,29 @@ static int luca_setattr(vnode_t *vp, vattr_t *vap)
 
     if(vap->va_mask & AT_ATIME)
     {
-        ext4_inode_set_access_time(inode_ref._ref.inode, vap->va_atime.tv_sec);
+        // ext4_inode_set_access_time(inode_ref._ref.inode, vap->va_atime.tv_sec);
+        inode_ref._ref.inode->access_time = to_le32(vap->va_atime.tv_sec);
         inode_ref._ref.dirty = true;
     }
 
     if(vap->va_mask & AT_CTIME)
     {
-        ext4_inode_set_change_inode_time(inode_ref._ref.inode, vap->va_ctime.tv_sec);
+        // ext4_inode_set_change_inode_time(inode_ref._ref.inode, vap->va_ctime.tv_sec);
+        inode_ref._ref.inode->change_inode_time = to_le32(vap->va_ctime.tv_sec);
         inode_ref._ref.dirty = true;
     }
 
     if(vap->va_mask & AT_MTIME)
     {
-        ext4_inode_set_modif_time(inode_ref._ref.inode, vap->va_mtime.tv_sec);
+        // ext4_inode_set_modif_time(inode_ref._ref.inode, vap->va_mtime.tv_sec);
+        inode_ref._ref.inode->modification_time = to_le32(vap->va_mtime.tv_sec);
         inode_ref._ref.dirty = true;
     }
 
     if(vap->va_mask & AT_MODE)
     {
-        ext4_inode_set_mode(&fs->sb, inode_ref._ref.inode, vap->va_mode);
+        // ext4_inode_set_mode(&fs->sb, inode_ref._ref.inode, vap->va_mode);
+        inode_ref._ref.inode->mode = to_le16(vap->va_mode);
         inode_ref._ref.dirty = true;
     }
     return (EOK);
@@ -1193,9 +1240,9 @@ static int luca_readlink(vnode_t *vp, uio_t *uio)
         return inode_ref._r;
     }
 
-    uint64_t size = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
+    uint64_t size = luca_inode_get_size(&fs->sb, inode_ref._ref.inode);
     if(size < (uint64_t)inode_ref._ref.inode->blocks && 
-       !ext4_inode_get_blocks_count(&fs->sb, inode_ref._ref.inode))
+       !luca_inode_get_blocks_count(&fs->sb, inode_ref._ref.inode))
     {
         char *content = (char *)inode_ref._ref.inode->blocks;
         return uiomove(content, size, uio);
@@ -1245,26 +1292,26 @@ static int luca_symlink(vnode_t *dvp, char *name, char *link)
         {/*内容比较少，就不再单独分配block了，直接存在inode的数组里面*/
             memset(inode_ref._ref.inode->blocks, 0, sizeof(inode_ref._ref.inode->blocks));
             memcpy(inode_ref._ref.inode->blocks, buffer, size);
-            ext4_inode_clear_flag(inode_ref._ref.inode, 0x00080000);
+            luca_inode_clear_flag(inode_ref._ref.inode, 0x00080000);
         }
         else
         {/*内容比较多就再分一个块出来*/
-        ext4_fs_inode_blocks_init(fs, &inode_ref._ref);
+            luca_fs_inode_blocks_init(fs, &inode_ref._ref);
 
-        uint32_t block_no;
-        ext4_fsblk_t fblock;
-        int r = ext4_fs_append_inode_dblk(&inode_ref._ref, &fblock, &block_no);
-        if(r != EOK)
-            return r;
+            uint32_t block_no;
+            uint64_t fblock;
+            int r = luca_fs_append_inode_dblk(&inode_ref._ref, &fblock, &block_no);
+            if(r != EOK)
+                return r;
 
-        uint64_t offset = fblock * block_size;
+            uint64_t offset = fblock * block_size;
 
-        r = ext4_block_writebytes(fs->bdev, offset, buffer, size);
-        if(r != EOK)
-            return r;
+            r = luca_block_writebytes(fs->bdev, offset, buffer, size);
+            if(r != EOK)
+                return r;
 
         }
-        ext4_inode_set_size(inode_ref._ref.inode, size);
+        luca_inode_set_size(inode_ref._ref.inode, size);
         inode_ref._ref.dirty = true;
         return EOK;
 
@@ -1272,210 +1319,6 @@ static int luca_symlink(vnode_t *dvp, char *name, char *link)
     return r;
 }
 
-
-static int
-ext_getattr(vnode_t *vp, vattr_t *vap)
-{
-    kprintf("Getting attributes at i-node:%ld\n", vp->v_ino);
-    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
-
-    auto_inode_ref inode_ref(fs, vp->v_ino);
-    if (inode_ref._r != EOK) {
-        return inode_ref._r;
-    }
-
-    vap->va_mode = ext4_inode_get_mode(&fs->sb, inode_ref._ref.inode);
-
-    uint32_t i_type = ext4_inode_type(&fs->sb, inode_ref._ref.inode);
-    if (i_type == EXT4_INODE_MODE_DIRECTORY) {
-       vap->va_type = VDIR;
-    } else if (i_type == EXT4_INODE_MODE_FILE) {
-        vap->va_type = VREG;
-    } else if (i_type == EXT4_INODE_MODE_SOFTLINK) {
-        vap->va_type = VLNK;
-    }
-
-    vap->va_nodeid = vp->v_ino;
-    vap->va_size = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
-    ext_debug("getattr: va_size:%ld\n", vap->va_size);
-
-    vap->va_atime.tv_sec = ext4_inode_get_access_time(inode_ref._ref.inode);
-    vap->va_mtime.tv_sec = ext4_inode_get_modif_time(inode_ref._ref.inode);
-    vap->va_ctime.tv_sec = ext4_inode_get_change_inode_time(inode_ref._ref.inode);
-
-    //auto *fsid = &vnode->v_mount->m_fsid; //TODO
-    //attr->va_fsid = ((uint32_t)fsid->__val[0]) | ((dev_t) ((uint32_t)fsid->__val[1]) << 32);
-
-    return (EOK);
-}
-
-static int
-ext_setattr(vnode_t *vp, vattr_t *vap)
-{
-    ext_debug("setattr\n");
-    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
-
-    auto_write_back wb(fs);
-    auto_inode_ref inode_ref(fs, vp->v_ino);
-    if (inode_ref._r != EOK) {
-        return inode_ref._r;
-    }
-
-    if (vap->va_mask & AT_ATIME) {
-        ext4_inode_set_access_time(inode_ref._ref.inode, vap->va_atime.tv_sec);
-        inode_ref._ref.dirty = true;
-    }
-
-    if (vap->va_mask & AT_CTIME) {
-        ext4_inode_set_change_inode_time(inode_ref._ref.inode, vap->va_ctime.tv_sec);
-        inode_ref._ref.dirty = true;
-    }
-
-    if (vap->va_mask & AT_MTIME) {
-        ext4_inode_set_modif_time(inode_ref._ref.inode, vap->va_mtime.tv_sec);
-        inode_ref._ref.dirty = true;
-    }
-
-    if (vap->va_mask & AT_MODE) {
-        ext4_inode_set_mode(&fs->sb, inode_ref._ref.inode, vap->va_mode);
-        inode_ref._ref.dirty = true;
-    }
-
-    return (EOK);
-}
-
-static int
-ext_truncate(struct vnode *vp, off_t new_size)
-{
-    ext_debug("truncate\n");
-    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
-    auto_write_back wb(fs);
-    return luca_trunc_inode(fs, vp->v_ino, new_size);
-}
-
-static int
-ext_link(vnode_t *tdvp, vnode_t *svp, char *name)
-{
-    ext_debug("link\n");
-    uint32_t len = strlen(name);
-    if (len > NAME_MAX || len > EXT4_DIRECTORY_FILENAME_LEN) {
-        return ENAMETOOLONG;
-    }
-
-    uint32_t source_link_no = svp->v_ino;
-    return luca_dir_link(tdvp, name, EXT4_DE_REG_FILE, &source_link_no, nullptr);
-}
-
-static int
-ext_arc(vnode_t *vp, struct file* fp, uio_t *uio)
-{
-    kprintf("[ext4] arc\n");
-    return (EINVAL);
-}
-
-static int
-ext_fallocate(vnode_t *vp, int mode, loff_t offset, loff_t len)
-{
-    kprintf("[ext4] fallocate\n");
-    return (EINVAL);
-}
-
-static int
-ext_readlink(vnode_t *vp, uio_t *uio)
-{
-    ext_debug("readlink\n");
-    if (vp->v_type != VLNK) {
-        return EINVAL;
-    }
-    if (uio->uio_offset < 0) {
-        return EINVAL;
-    }
-    if (uio->uio_resid == 0) {
-        return 0;
-    }
-
-    struct ext4_fs *fs = (struct ext4_fs *)vp->v_mount->m_data;
-
-    auto_inode_ref inode_ref(fs, vp->v_ino);
-    if (inode_ref._r != EOK) {
-        return inode_ref._r;
-    }
-
-    uint64_t fsize = ext4_inode_get_size(&fs->sb, inode_ref._ref.inode);
-    if (fsize < sizeof(inode_ref._ref.inode->blocks)
-             && !ext4_inode_get_blocks_count(&fs->sb, inode_ref._ref.inode)) {
-
-        char *content = (char *)inode_ref._ref.inode->blocks;
-        return uiomove(content, fsize, uio);
-    } else {
-        uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
-        void *buf = malloc(block_size);
-        size_t read_count = 0;
-        int ret = luca_internal_read(fs, &inode_ref._ref, uio->uio_offset, buf, fsize, &read_count);
-        if (ret) {
-            kprintf("[ext_readlink] Error reading data\n");
-            free(buf);
-            return ret;
-        }
-
-        ret = uiomove(buf, read_count, uio);
-        free(buf);
-        return ret;
-    }
-}
-
-static int
-ext_fsymlink_set(struct ext4_fs *fs, uint32_t inode_no, const void *buf, uint32_t size)
-{
-    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
-    if (size > block_size) {
-        return EINVAL;
-    }
-
-    auto_inode_ref inode_ref(fs, inode_no);
-    if (inode_ref._r != EOK) {
-        return inode_ref._r;
-    }
-
-    /*If the size of symlink is smaller than 60 bytes*/
-    if (size < sizeof(inode_ref._ref.inode->blocks)) {
-        memset(inode_ref._ref.inode->blocks, 0, sizeof(inode_ref._ref.inode->blocks));
-        memcpy(inode_ref._ref.inode->blocks, buf, size);
-        ext4_inode_clear_flag(inode_ref._ref.inode, EXT4_INODE_FLAG_EXTENTS);
-    } else {
-        ext4_fs_inode_blocks_init(fs, &inode_ref._ref);
-
-        uint32_t sblock;
-        ext4_fsblk_t fblock;
-        int r = ext4_fs_append_inode_dblk(&inode_ref._ref, &fblock, &sblock);
-        if (r != EOK)
-            return r;
-
-        uint64_t off = fblock * block_size;
-        r = ext4_block_writebytes(fs->bdev, off, buf, size);
-        if (r != EOK)
-            return r;
-    }
-
-    ext4_inode_set_size(inode_ref._ref.inode, size);
-    inode_ref._ref.dirty = true;
-
-    return EOK;
-}
-
-static int
-ext_symlink(vnode_t *dvp, char *name, char *link)
-{
-    ext_debug("symlink\n");
-    struct ext4_fs *fs = (struct ext4_fs *)dvp->v_mount->m_data;
-    auto_write_back wb(fs);
-    uint32_t inode_no_created;
-    int r = luca_dir_link(dvp, name, EXT4_DE_SYMLINK, nullptr, &inode_no_created);
-    if (r == EOK ) {
-       return ext_fsymlink_set(fs, inode_no_created, link, strlen(link));
-    }
-    return r;
-}
 
 #define luca_seek        ((vnop_seek_t)vop_nullop)
 #define luca_inactive    ((vnop_inactive_t)vop_nullop)
@@ -1496,8 +1339,8 @@ struct vnops luca_vnops = {
     luca_rename,     /* rename */
     luca_mkdir,      /* mkdir */
     luca_rmdir,      /* rmdir */
-    ext_getattr,    /* getattr */
-    ext_setattr,    /* setattr */
+    luca_getattr,    /* getattr */
+    luca_setattr,    /* setattr */
     luca_inactive,   /* inactive */
     luca_truncate,   /* truncate */
     luca_link,       /* link */

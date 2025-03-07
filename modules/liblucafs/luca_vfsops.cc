@@ -38,6 +38,111 @@ static int blockdev_open(luca_blockdev_t *bdev)
     return EOK;
 }
 
+int luca_block_init(luca_blockdev_t *bdev)
+{
+	int rc;
+	ext4_assert(bdev);
+	ext4_assert(bdev->bdif);
+	ext4_assert(bdev->bdif->open &&
+		   bdev->bdif->close &&
+		   bdev->bdif->bread &&
+		   bdev->bdif->bwrite);
+
+	if (bdev->bdif->ph_refctr) {
+		bdev->bdif->ph_refctr++;
+		return EOK;
+	}
+
+	/*Low level block init*/
+	rc = bdev->bdif->open(bdev);
+	if (rc != EOK)
+		return rc;
+
+	bdev->bdif->ph_refctr = 1;
+	return EOK;
+}
+
+int luca_fs_init(luca_fs_t *fs, luca_blockdev_t *bdev,
+		 bool read_only)
+{
+	int r, i;
+	uint16_t tmp;
+	uint32_t bsize;
+
+	ext4_assert(fs && bdev);
+
+	fs->bdev = bdev;
+
+	fs->read_only = read_only;
+
+	//r = ext4_sb_read(fs->bdev, &fs->sb);
+    /*读取超级块*/
+    printf("fs init测试1\n");
+    r = luca_block_readbytes(fs->bdev, LUCA_SUPERBLOCK_OFFSET, &fs->sb, LUCA_SUPERBLOCK_SIZE);
+	if (r != EOK)
+		return r;
+
+	// if (!ext4_sb_check(&fs->sb))
+	// 	return ENOTSUP;
+    printf("fs init测试2\n");
+    if(fs->sb.magic != LUCA_SUPERBLOCK_MAGIC)
+        return ENOTSUP;
+
+
+    printf("fs init测试3\n");
+	bsize = ext4_sb_get_block_size(&fs->sb);
+    //bsize = 1024 << fs->sb.log_block_size;
+    printf("block size: %d\n", bsize);
+	if (bsize > EXT4_MAX_BLOCK_SIZE)
+		return ENXIO;
+
+	// r = ext4_fs_check_features(fs, &read_only);
+	// if (r != EOK)
+	// 	return r;
+
+	if (read_only)
+		fs->read_only = read_only;
+
+	/* Compute limits for indirect block levels */
+	uint32_t blocks_id = bsize / sizeof(uint32_t);
+
+    /*12个直接指针，柒雨每级1个*/
+	fs->inode_block_limits[0] = LUCA_INODE_DIRECT_BLOCK_COUNT;
+	fs->inode_blocks_per_level[0] = 1;
+
+	for (i = 1; i < 4; i++) {
+		fs->inode_blocks_per_level[i] =
+		    fs->inode_blocks_per_level[i - 1] * blocks_id;
+		fs->inode_block_limits[i] = fs->inode_block_limits[i - 1] +
+					    fs->inode_blocks_per_level[i];
+	}
+
+	/*Validate FS*/
+	//tmp = ext4_get16(&fs->sb, state);
+    tmp = fs->sb.state;
+	if (tmp & LUCA_SUPERBLOCK_STATE_ERROR_FS)
+        kprintf("last umount error: superblock fs_error flag\n");
+		// ext4_dbg(DEBUG_FS, DBG_WARN
+		// 		"last umount error: superblock fs_error flag\n");
+
+
+	if (!fs->read_only) {
+		/* Mark system as mounted */
+		ext4_set16(&fs->sb, state, EXT4_SUPERBLOCK_STATE_ERROR_FS);
+        //fs->sb.state = LUCA_SUPERBLOCK_STATE_ERROR_FS;
+		r = luca_sb_write(fs->bdev, &fs->sb);
+
+
+		if (r != EOK)
+			return r;
+
+		/*Update mount count*/
+		ext4_set16(&fs->sb, mount_count, ext4_get16(&fs->sb, mount_count) + 1);
+	}
+
+	return r;
+}
+
 
 static int blockdev_bread_or_write(luca_blockdev_t *bdev, void *buf, uint64_t blk_id, uint32_t blk_cnt, bool read)
 {
@@ -92,9 +197,26 @@ static int blockdev_close(luca_blockdev_t *bdev)
     return EOK;
 }
 
-EXT4_BLOCKDEV_STATIC_INSTANCE(luca_blockdev, 512, 0, blockdev_open,
-                              blockdev_bread, blockdev_bwrite, blockdev_close, 0, 0);
+// LUCA_BLOCKDEV_STATIC_INSTANCE(luca_blockdev, 512, 0, blockdev_open,
+//                               blockdev_bread, blockdev_bwrite, blockdev_close, 0, 0);
 
+static uint8_t luca_blockdev_ph_bbuf[512]; // 定义一个静态缓冲区
+static struct luca_blockdev_iface luca_blockdev_iface = { // 定义并初始化块设备接口
+    .open = blockdev_open,
+    .bread = blockdev_bread,
+    .bwrite = blockdev_bwrite,
+    .close = blockdev_close,
+    .lock = 0,
+    .unlock = 0,
+    .ph_bsize = 512,
+    .ph_bcnt = 0,
+    .ph_bbuf = luca_blockdev_ph_bbuf,
+};
+static luca_blockdev_t luca_blockdev = { // 定义并初始化 luca_blockdev_t 类型的结构体
+    .bdif = &luca_blockdev_iface,
+    .part_offset = 0,
+    .part_size = 0 * 512,
+};
 
 static luca_fs_t luca_fs;
 static luca_bcache_t luca_block_cache;
@@ -103,9 +225,13 @@ extern struct vnops luca_vnops;
 int luca_blockcache_init(luca_fs_t *fs, luca_blockdev_t *bdev, luca_bcache_t *bcache)
 {
     uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
-    ext4_block_set_lb_size(bdev, bsize);
+    //ext4_block_set_lb_size(bdev, bsize);
+    /*设置bdev中的块大小和数目*/
+    ext4_assert(!(bsize % bdev->bdif->ph_bsize));
+    bdev->lg_bsize = bsize;
+	bdev->lg_bcnt = bdev->part_size / bsize;
 
-    int r = ext4_bcache_init_dynamic(bcache, CONFIG_BLOCK_DEV_CACHE_SIZE, bsize);
+    int r = luca_bcache_init_dynamic(bcache, CONFIG_BLOCK_DEV_CACHE_SIZE, bsize);
     if(r != EOK) {
         return r;
     }
@@ -113,11 +239,11 @@ int luca_blockcache_init(luca_fs_t *fs, luca_blockdev_t *bdev, luca_bcache_t *bc
     if(bsize != bcache->itemsize)
         return ENOTSUP;
 
-    r = ext4_block_bind_bcache(bdev, bcache);
+    r = luca_block_bind_bcache(bdev, bcache);
     if(r != EOK) {
-        ext4_bcache_cleanup(bcache);
-        ext4_block_fini(bdev);
-        ext4_bcache_fini_dynamic(bcache);
+        luca_bcache_cleanup(bcache);
+        luca_block_fini(bdev);
+        luca_bcache_fini_dynamic(bcache);
         return r;
     }
 
@@ -166,7 +292,7 @@ static int luca_mount(struct mount *mp, const char *dev, int flags, const void *
 {
     struct device *device;
 
-    printf("进入了luca_mount\n");
+    printf("进入了luca_mount magic=%d\n", luca_fs.sb.magic);
     const char *dev_name = dev + 5;  //跳过前缀名 /dev/
     int error = device_open(dev_name, DO_RDWR, &device);
     if (error) {
@@ -197,16 +323,17 @@ static int luca_mount(struct mount *mp, const char *dev, int flags, const void *
     luca_blockdev.part_size = device->size;
     luca_blockdev.bdif->ph_bcnt = luca_blockdev.part_size / luca_blockdev.bdif->ph_bsize;
 
-    error = ext4_block_init(&luca_blockdev);
+    error = luca_block_init(&luca_blockdev);
     if (error != EOK) {
         return error;
     }
 
-    error = ext4_fs_init(&luca_fs, &luca_blockdev, false);
+    printf("进入fsinit\n");
+    error = luca_fs_init(&luca_fs, &luca_blockdev, false);
     if (error != EOK) {
         return error;
     }
-
+    printf("进入cacheinit\n");
     error = luca_blockcache_init(&luca_fs, &luca_blockdev, &luca_block_cache);
     if (error != EOK) {
         return error;
@@ -223,13 +350,21 @@ static int luca_mount(struct mount *mp, const char *dev, int flags, const void *
 
 static int luca_unmount(struct mount *mp, int flags)
 {
-    int r = ext4_fs_fini(&luca_fs);
+    int r = EOK;
+    ext4_assert(luca_fs);
+
+	/*Set superblock state*/
+	ext4_set16(&luca_fs.sb, state, EXT4_SUPERBLOCK_STATE_VALID_FS);
+
+	if (!luca_fs.read_only)
+		r = luca_sb_write(luca_fs.bdev, &luca_fs.sb);
+
     if (r == EOK) {
-        ext4_bcache_cleanup(&luca_block_cache);
-        ext4_bcache_fini_dynamic(&luca_block_cache);
+        luca_bcache_cleanup(&luca_block_cache);
+        luca_bcache_fini_dynamic(&luca_block_cache);
     }
 
-    ext4_block_fini(&luca_blockdev);
+    luca_block_fini(&luca_blockdev);
     r = device_close((struct device*)luca_blockdev.bdif->p_user);
     printf("[lucafs] Unmounted filesystem with: %d!\n", r);
 
@@ -254,7 +389,7 @@ static int luca_statfs(struct mount *mp, struct statfs *statp)
     statp->f_files = ext4_get32(&fs->sb, inodes_count);
 
     statp->f_namelen = EXT4_DIRECTORY_FILENAME_LEN;
-    statp->f_type = EXT4_SUPERBLOCK_MAGIC;
+    statp->f_type = LUCA_SUPERBLOCK_MAGIC;
 
     statp->f_fsid = mp->m_fsid; /*fs识别*/
 
