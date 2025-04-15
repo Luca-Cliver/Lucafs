@@ -41,7 +41,7 @@ struct auto_inode_ref {
     int _r;
 
     auto_inode_ref(luca_fs_t *fs, uint32_t inode_no) {
-        kprintf("[lucafs] auto_inode_ref called for inode %d\n", inode_no);
+        //kprintf("[lucafs] auto_inode_ref called for inode %d\n", inode_no);
         // _r = luca_fs_get_inode_ref(fs, inode_no, &_ref, true);
         _r = luca_fs_get_inode_ref(fs, inode_no, &_ref);
     }
@@ -77,6 +77,7 @@ typedef	off_t offset_t;
 typedef	struct vattr vattr_t;
 
 
+
 static int luca_open(struct file *fp)
 {
     // vnode_t *vp = fp->f_dentry.get()->d_vnode;
@@ -96,8 +97,167 @@ static int luca_close(struct vnode *vp, struct file *fp)
     return (EOK);
 }
 
+static int luca_internal_read_withcache(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t offset, void *buffer, size_t size, size_t *rcnt)
+{
+    kprintf("[luca_internal_read] offset:%ld, size:%ld\n", offset, size);
+    uint64_t fblock;
+    uint64_t block_start = 0;
+
+    uint8_t *u8_buf = (uint8_t *)buffer;
+    int r, rr = EOK;
+
+    if(!size)
+        return EOK;
+
+    luca_sblock_t *const sb = &fs->sb;
+
+    if(rcnt)
+        *rcnt = 0;
+
+    uint64_t fsize = luca_inode_get_size(sb, ref->inode);
+    uint32_t block_size = ext4_sb_get_block_size(sb);
+
+    size = ((uint64_t)size > (fsize-offset)) ? ((size_t)(fsize-offset)) : size;
+
+    uint32_t block_index = (uint32_t)(offset / block_size);   //第一个块的索引
+    uint32_t block_final = (uint32_t)((offset + size) / block_size);   //最后一个块的索引
+    uint32_t unalg = (offset) % block_size;    //第一个块中开始的位置
+
+    uint32_t block_count = 0;
+
+
+    /*没对齐的部分*/
+    if(unalg)
+    {
+        kprintf("前部未对齐部分\n");
+        /*如果size小于第一个块剩余的部分，直接读取size，否则读出第一个块剩余的部分*/
+        size_t len = size > (block_size - unalg) ? (block_size - unalg) : size;
+
+        r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
+        if(r != EOK)
+            return r;
+
+        /*检查这里是不是没有写入的块*/
+        if(fblock != 0)
+        {    
+            /*fblock不为零说明是写入的块*/
+            uint64_t off = fblock * block_size + unalg;
+            /*lwext中提供的和底层交互的接口*/
+            cache_node_t *node = cache_find(fblock, fs->bdev);
+            if(node)
+            {/*查到了就直接进来就可以*/
+                memcpy(u8_buf, node->cache.data + unalg, len);
+            }
+            else
+            {/*没查到要去盘里捞*/
+                node = cache_num_sectors_from_disk(fs->bdev, fblock, block_final - block_index + 1);
+                memcpy(u8_buf, node->cache.data + unalg, len);
+            }
+        }
+        else
+        {   /*fblock为零说明是未写入的块,内容填充为0*/
+            memset(u8_buf, 0, len);
+        }
+
+        u8_buf += len;
+        size -= len;
+        offset += len;
+
+        if(rcnt)
+            *rcnt += len;
+
+        block_index++;
+    }
+
+    if(size >= block_size)
+        kprintf("中间完整块\n");
+
+    block_start = 0;
+    while(size >= block_size)
+    {/*读中间的完整块*/
+        while(block_index < block_final)
+        {/*连续的块一起处理一起读*/
+            r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
+
+            if(r != EOK)
+                return r;
+
+            block_index++;
+
+            if(!block_start)
+                block_start = fblock;
+
+            if((block_start + block_count) != fblock)
+                break;
+
+            block_count++;
+        }
+        
+        // kprintf("[luca_internal_read] block_start:%ld, block_count:%d\n", block_start, block_count);
+        // r = luca_blocks_get_direct(fs->bdev, u8_buf, block_start, block_count);
+        for(int i = 0; i < block_count; i++)
+        {
+            cache_node_t *node = cache_find(block_start + i, fs->bdev);
+            if(node)
+            {
+                memcpy(u8_buf+i*block_size, node->cache.data, block_size);
+            }
+            else
+            {
+                node = cache_num_sectors_from_disk(fs->bdev, block_start + i, block_final - block_index + 1);
+                memcpy(u8_buf+i*block_size, node->cache.data, block_size);
+            }
+        }
+
+        if(r != EOK)
+            return r;
+
+        size -= block_size * block_count;
+        u8_buf += block_size * block_count;
+        offset += block_size * block_count;
+
+        if(rcnt)
+            *rcnt += block_size * block_count;
+
+        block_start = fblock;
+        block_count = 1;
+
+    }
+
+    if(size)
+    {/*最后一个块剩余的一部分*/
+        kprintf("最后一个块剩余的一部分\n");
+        r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
+        if(r != EOK)
+            return r;
+
+        uint64_t off = fblock * block_size;
+        cache_node_t *node = cache_find(fblock, fs->bdev);
+        if(node)
+        {
+            memcpy(u8_buf, node->cache.data, size);
+        }
+        else
+        {
+            node = cache_num_sectors_from_disk(fs->bdev, fblock, 1);
+            memcpy(u8_buf, node->cache.data, size);
+        }
+
+       
+
+        offset += size;
+
+        if(rcnt)
+            *rcnt += size;
+    }
+
+    return r;
+
+}
+
 static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t offset, void *buffer, size_t size, size_t *rcnt)
 {
+    kprintf("[luca_internal_read] offset:%ld, size:%ld\n", offset, size);
     uint64_t fblock;
     uint64_t block_start = 0;
 
@@ -126,6 +286,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
     /*没对齐的部分*/
     if(unalg)
     {
+        kprintf("前部未对齐部分\n");
         /*如果size小于第一个块剩余的部分，直接读取size，否则读出第一个块剩余的部分*/
         size_t len = size > (block_size - unalg) ? (block_size - unalg) : size;
 
@@ -135,7 +296,8 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
 
         /*检查这里是不是没有写入的块*/
         if(fblock != 0)
-        {   /*fblock不为零说明是写入的块*/
+        {    
+            /*fblock不为零说明是写入的块*/
             uint64_t off = fblock * block_size + unalg;
             /*lwext中提供的和底层交互的接口*/
             r = luca_block_readbytes(fs->bdev, off, u8_buf, len);
@@ -157,6 +319,8 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
         block_index++;
     }
 
+    if(size >= block_size)
+        kprintf("中间完整块\n");
     block_start = 0;
     while(size >= block_size)
     {/*读中间的完整块*/
@@ -180,6 +344,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
         
         kprintf("[luca_internal_read] block_start:%ld, block_count:%d\n", block_start, block_count);
         r = luca_blocks_get_direct(fs->bdev, u8_buf, block_start, block_count);
+        // r = luca_blocks_get(fs->bdev, u8_buf, block_start, block_count);
 
         if(r != EOK)
             return r;
@@ -198,6 +363,7 @@ static int luca_internal_read(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t off
 
     if(size)
     {/*最后一个块剩余的一部分*/
+        kprintf("最后一个块剩余的一部分\n");
         r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, false, true);
         if(r != EOK)
             return r;
@@ -248,8 +414,8 @@ static int luca_read(struct vnode *vp, struct file *fp, struct uio *uio, int iof
     void *buffer = alloc_contiguous_aligned(read_size, alignof(std::max_align_t));
 
     size_t read_count = 0;
+    // int ret = luca_internal_read_withcache(fs, &inode_ref._ref, uio->uio_offset, buffer, read_size, &read_count);
     int ret = luca_internal_read(fs, &inode_ref._ref, uio->uio_offset, buffer, read_size, &read_count);
-    
     if (ret) {
         kprintf("[luca_read] Error reading data\n");
         free(buffer);
@@ -257,9 +423,332 @@ static int luca_read(struct vnode *vp, struct file *fp, struct uio *uio, int iof
     }
 
     ret = uiomove(buffer, read_count, uio);
+    //printf("[luca_read] Read %d bytes\n", ret);
     free_contiguous_aligned(buffer);
 
     return ret;
+}
+
+static int luca_internal_write_withcache(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t offset, void *buffer, size_t size, size_t *wcnt)
+{
+    kprintf("[luca_internal_write] offset:%ld, size:%ld\n", offset, size);
+    cache_queue_t *queue = fs->bdev->data_cache_queue;
+    
+    uint64_t fblock;
+    uint64_t block_start = 0;
+
+    uint8_t *u8_buf = (uint8_t *)buffer;
+    int r, rr = EOK;
+
+    if(!size)
+        return EOK;
+
+    luca_sblock_t *const sb = &fs->sb;
+
+    if(wcnt)
+        *wcnt = 0;
+
+    uint64_t fsize = luca_inode_get_size(sb, ref->inode);
+    uint32_t block_size = ext4_sb_get_block_size(sb);
+
+    uint32_t block_index = (uint32_t)(offset / block_size);   //第一个块的索引
+    uint32_t block_final = (uint32_t)((offset + size) / block_size);   //最后一个块的索引
+    uint32_t file_blocks = 0;   //文件中的块数
+    if(fsize % block_size)
+        file_blocks = (uint32_t)(fsize / block_size) + 1;
+    else
+        file_blocks = (uint32_t)(fsize / block_size);
+
+    uint32_t unalg = (offset) % block_size;    //第一个块中开始的位置
+
+    uint32_t block_count = 0;
+
+    if(unalg)
+    {/*没有对齐的块肯定不是空缺的块*/
+        size_t len = size > (block_size - unalg) ? (block_size - unalg) : size;
+        uint64_t off;
+        bool is_new_block = false;
+
+        if(block_index < file_blocks)
+        {
+            //r = ext4_fs_init_inode_dblk_idx(ref, block_index, &fblock);
+            r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock,
+						   true, true);
+            is_new_block = false;
+        }
+        else
+        {
+            r = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
+            // kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
+            file_blocks++;
+            is_new_block = true;
+        }
+        if(r != EOK)
+            goto Finish;
+
+        uint8_t temp_buf[block_size];
+        if(is_new_block)
+        {/*既然是新块，就不需要从cache里面查了 前面没有对齐，还需要先读出来*/
+            uint64_t pba = (fblock*block_size + fs->bdev->part_offset) / fs->bdev->bdif->ph_bsize;
+            uint32_t pb_cnt = fs->bdev->lg_bsize / fs->bdev->bdif->ph_bsize;
+
+            r = fs->bdev->bdif->bread(fs->bdev, temp_buf, pba, pb_cnt);
+            fs->bdev->bdif->bread_ctr++;
+            if(r != EOK)
+            {
+                kprintf("[luca_internal_write] Read block error\n");
+                goto Finish;
+            }
+            memcpy(temp_buf + unalg, u8_buf, len);
+            /*做出来cache块直接插入即可*/
+            r = cache_one_block(fs->bdev, fblock, temp_buf);
+            if(r != EOK)
+            {
+                kprintf("[luca_internal_write] Cache block error\n");
+                goto Finish;
+            }
+        }
+        else
+        {
+            cache_node_t *node = cache_find(fblock, fs->bdev);
+            if(node)
+            {/*找到了cache块，只需要把数据修改，让后插入到脏链中就可以*/
+                memcpy(node->cache.data + unalg, u8_buf, len);
+                node->is_dirty = true;
+                insert_dirty_list(fs->bdev, node);
+            }
+            else
+            {/*没找到就做一个cache块插入*/
+                uint64_t pba = (fblock*block_size + fs->bdev->part_offset) / fs->bdev->bdif->ph_bsize;
+                uint32_t pb_cnt = fs->bdev->lg_bsize / fs->bdev->bdif->ph_bsize;
+                r = fs->bdev->bdif->bread(fs->bdev, temp_buf, pba, pb_cnt);
+                fs->bdev->bdif->bread_ctr++;
+                if(r != EOK)
+                {
+                    kprintf("[luca_internal_write] Read block error\n");
+                    goto Finish;
+                }
+                memcpy(temp_buf + unalg, u8_buf, len);
+                cache_one_block(fs->bdev, fblock, temp_buf);
+            }
+        }
+        // off = fblock * block_size + unalg;
+        // r = luca_block_writebytes(fs->bdev, off, u8_buf, len);
+        // if(r != EOK)
+        //     goto Finish;
+
+        u8_buf += len;
+        size -= len;
+        offset += len;
+
+        if(wcnt)
+            *wcnt += len;
+
+        block_index++;
+    }
+
+    /*开启写回cache*/
+    r = luca_block_cache_write_back(fs->bdev, 1);
+    if(r != EOK)
+        goto Finish;
+
+    /*本文件系统并不支持稀疏文件，因此需要填补间隙*/
+    while(file_blocks < block_index)
+    {
+        uint32_t block_index_;
+        r = luca_fs_append_inode_dblk(ref, nullptr, &block_index_);
+        if(r != EOK)
+        {
+            offset = file_blocks * block_size;
+            goto overflow;
+        }
+        // kprintf("[luca_internal_write] Appended block=%d\n", block_index_);
+        file_blocks++;
+    }
+
+    while(size >= block_size)
+    {/*中间的完整块*/
+        while(block_index < block_final)
+        {  /*连续的快一起写*/
+            if(block_index < file_blocks)
+            {
+                r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, true, true);
+                if(r != EOK)
+                    goto Finish;
+            }
+            else
+            {
+                rr = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
+                // kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
+                if(rr != EOK)
+                    break;
+            }
+
+            block_index++;
+            if(!block_start)
+                block_start = fblock;
+
+            /*不连续了就跳出*/
+            if((block_start + block_count) != fblock)
+                break;
+
+            block_count++;
+        }
+
+        for(int i = 0; i < block_count; i++)
+        {
+            // struct timespec start_find, end_find;
+            // clock_gettime(CLOCK_MONOTONIC, &start_find);
+            cache_node_t *node = cache_find(block_start + i, fs->bdev);
+            // clock_gettime(CLOCK_MONOTONIC, &end_find);
+            // double find_duration = (end_find.tv_sec - start_find.tv_sec) + (end_find.tv_nsec - start_find.tv_nsec) / 1e9;
+            // kprintf("查找用的时间: %f 秒\n", find_duration);
+            if(node)
+            {
+                // struct timespec start_memcpy, end_memcpy;
+                // clock_gettime(CLOCK_MONOTONIC, &start_memcpy);
+                memcpy(node->cache.data, u8_buf + i * block_size, block_size);
+                node->is_dirty = true;
+                insert_dirty_list(fs->bdev, node);
+                // clock_gettime(CLOCK_MONOTONIC, &end_memcpy);
+                // double memcpy_duration = (end_memcpy.tv_sec - start_memcpy.tv_sec) + (end_memcpy.tv_nsec - start_memcpy.tv_nsec) / 1e9;
+                // kprintf("直接修改缓存内容用的时间: %f 秒\n", memcpy_duration);
+            }
+            else
+            {
+                // struct timespec start_cache, end_cache;
+                // clock_gettime(CLOCK_MONOTONIC, &start_cache);
+                uint64_t pba = ((block_start + i)*block_size + fs->bdev->part_offset) / fs->bdev->bdif->ph_bsize;
+                uint32_t pb_cnt = fs->bdev->lg_bsize / fs->bdev->bdif->ph_bsize;
+                cache_one_block(fs->bdev, block_start + i, u8_buf+i*block_size);
+                // clock_gettime(CLOCK_MONOTONIC, &end_cache);
+                // double cache_duration = (end_cache.tv_sec - start_cache.tv_sec) + (end_cache.tv_nsec - start_cache.tv_nsec) / 1e9;
+                // kprintf("填cache用的时间: %f 秒\n", cache_duration);
+            }
+        }
+
+        // // printf("[luca_internal_write]写完整块\n");
+        // r = luca_blocks_set_direct(fs->bdev, u8_buf, block_start, block_count);
+        // kprintf("[luca_internal_write] Wrote direct %d blocks at block %ld\n", block_count, block_start);
+        // if(r != EOK)
+        //     break;
+
+
+
+        size -= block_size * block_count;
+        u8_buf += block_size * block_count;
+        offset += block_size * block_count;
+
+        if(wcnt)
+            *wcnt += block_size * block_count;
+
+        block_start = fblock;
+        block_count = 1;
+
+        if(rr != EOK)
+        {
+            r = rr;
+            goto overflow;
+        }
+    }
+
+    /*关闭写回cache*/
+    luca_block_cache_write_back(fs->bdev, 0);
+
+    if(r != EOK)
+        goto Finish;
+
+    if(size)
+    {/*剩余部分*/
+        uint64_t off;
+        if(block_index < file_blocks)
+        {
+            r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, true, true);
+            if(r != EOK)
+                goto Finish;
+        }
+        else
+        {
+            r = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
+            // kprintf("[luca_internal_write] Appended (4) block=%d, phys:%ld\n", block_index, fblock);
+            if(r != EOK)
+                goto overflow;
+        }
+
+        off = fblock * block_size;
+        uint8_t temp_buf[block_size];
+
+
+        struct timespec start_find, end_find;
+        clock_gettime(CLOCK_MONOTONIC, &start_find);
+        cache_node_t *node = cache_find(fblock, fs->bdev);
+        clock_gettime(CLOCK_MONOTONIC, &end_find);
+        double find_duration = (end_find.tv_sec - start_find.tv_sec) + (end_find.tv_nsec - start_find.tv_nsec) / 1e9;
+        kprintf("剩余不满：查找用的时间: %f 秒\n", find_duration);
+        if(node)
+        {
+            struct timespec start_memcpy, end_memcpy;
+            clock_gettime(CLOCK_MONOTONIC, &start_memcpy);
+            // printf("[luca_internal_write]写剩余块1\n");
+            memcpy(node->cache.data, u8_buf, size);
+            // printf("[luca_internal_write]写剩余块2\n");
+            node->is_dirty = true;
+            insert_dirty_list(fs->bdev, node);
+            // printf("[luca_internal_write]写剩余块4\n");
+            clock_gettime(CLOCK_MONOTONIC, &end_memcpy); // 在插入脏链后获取结束时间
+            double memcpy_duration = (end_memcpy.tv_sec - start_memcpy.tv_sec) + (end_memcpy.tv_nsec - start_memcpy.tv_nsec) / 1e9;
+            kprintf("剩余不满：直接修改缓存内容和插入脏链用的时间: %f 秒\n", memcpy_duration);
+        }
+        else
+        {
+            struct timespec start_cache, end_cache;
+            clock_gettime(CLOCK_MONOTONIC, &start_cache);
+            uint64_t pba = (fblock*block_size + fs->bdev->part_offset) / fs->bdev->bdif->ph_bsize;
+            uint32_t pb_cnt = fs->bdev->lg_bsize / fs->bdev->bdif->ph_bsize;
+            r = fs->bdev->bdif->bread(fs->bdev, temp_buf, pba, pb_cnt);
+            fs->bdev->bdif->bread_ctr++;
+            if(r != EOK)
+            {
+                kprintf("[luca_internal_write] Read block error\n");
+                goto Finish;
+            }
+            memcpy(temp_buf, u8_buf, size);
+            cache_one_block(fs->bdev, fblock, temp_buf);
+            clock_gettime(CLOCK_MONOTONIC, &end_cache);
+            double cache_duration = (end_cache.tv_sec - start_cache.tv_sec) + (end_cache.tv_nsec - start_cache.tv_nsec) / 1e9;
+            kprintf("剩余不满:填cache用的时间: %f 秒\n", cache_duration);
+        }
+        // r = luca_block_writebytes(fs->bdev, off, u8_buf, size);
+        // if(r != EOK)
+        //     goto Finish;
+
+        offset += size;
+
+        if(wcnt)
+            *wcnt += size;
+    }
+
+
+overflow:
+    if(offset > fsize)
+    {
+        luca_inode_set_size(ref->inode, offset);
+        ref->dirty = true;
+    }
+
+
+Finish:
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    // ext4_inode_set_change_inode_time(ref->inode, ts.tv_sec);
+    // ext4_inode_set_modif_time(ref->inode, ts.tv_sec);
+    ref->inode->change_inode_time = to_le32(ts.tv_sec);
+    ref->inode->modification_time = to_le32(ts.tv_sec);
+    ref->dirty = true;
+
+    return r;
+
+
 }
 
 static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t offset, void *buffer, size_t size, size_t *wcnt)
@@ -300,7 +789,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
         size_t len = size > (block_size - unalg) ? (block_size - unalg) : size;
         uint64_t off;
 
-        if(block_index <  file_blocks)
+        if(block_index < file_blocks)
         {
             //r = ext4_fs_init_inode_dblk_idx(ref, block_index, &fblock);
             r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock,
@@ -309,7 +798,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
         else
         {
             r = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
-            kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
+            // kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
             file_blocks++;
         }
         if(r != EOK)
@@ -345,7 +834,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
             offset = file_blocks * block_size;
             goto overflow;
         }
-        kprintf("[luca_internal_write] Appended block=%d\n", block_index_);
+        // kprintf("[luca_internal_write] Appended block=%d\n", block_index_);
         file_blocks++;
     }
 
@@ -353,7 +842,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
     {/*中间的完整块*/
         while(block_index < block_final)
         {  /*连续的快一起写*/
-            if(block_index < block_final)
+            if(block_index < file_blocks)
             {
                 r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, true, true);
                 if(r != EOK)
@@ -362,7 +851,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
             else
             {
                 rr = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
-                kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
+                // kprintf("[luca_internal_write] Appended block=%d, phys:%ld\n", block_index, fblock);
                 if(rr != EOK)
                     break;
             }
@@ -378,6 +867,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
             block_count++;
         }
 
+       // printf("[luca_internal_write]写完整块\n");
         r = luca_blocks_set_direct(fs->bdev, u8_buf, block_start, block_count);
         kprintf("[luca_internal_write] Wrote direct %d blocks at block %ld\n", block_count, block_start);
         if(r != EOK)
@@ -409,7 +899,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
     if(size)
     {/*剩余部分*/
         uint64_t off;
-        if(block_index < block_final)
+        if(block_index < file_blocks)
         {
             r = luca_fs_get_inode_dblk_idx_internal(ref, block_index, &fblock, true, true);
             if(r != EOK)
@@ -418,7 +908,7 @@ static int luca_internal_write(luca_fs_t *fs, luca_inode_ref_t *ref, uint64_t of
         else
         {
             r = luca_fs_append_inode_dblk(ref, &fblock, &block_index);
-            kprintf("[luca_internal_write] Appended (4) block=%d, phys:%ld\n", block_index, fblock);
+            // kprintf("[luca_internal_write] Appended (4) block=%d, phys:%ld\n", block_index, fblock);
             if(r != EOK)
                 goto overflow;
         }
@@ -498,6 +988,7 @@ static int luca_wirte(vnode_t *vp, uio_t *uio, int ioflag)
     }
 
     size_t write_count = 0;
+    // ret = luca_internal_write_withcache(fs, &inode_ref._ref, uio->uio_offset, buffer, uio->uio_resid, &write_count);
     ret = luca_internal_write(fs, &inode_ref._ref, uio->uio_offset, buffer, uio->uio_resid, &write_count);
 
     uio->uio_resid -= write_count;
@@ -673,10 +1164,12 @@ static int luca_dir_initialize(luca_inode_ref_t *parent, luca_inode_ref_t *child
 #if CONFIG_DIR_INDEX_ENABLE
     if(dir_index_on)
     {
-        r = luca_dir_dx_init(parent, child);
+        // r = luca_dir_dx_init(parent, child);
+        r = luca_dir_dx_init(child, parent);
         if(r != EOK)
             return r;
 
+        printf("[lucafs] dir_index_on=%d\n",dir_index_on);
         luca_inode_set_flag(child->inode, 0x00001000);
     }
     else
@@ -747,6 +1240,7 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
     if(!link_no)
         luca_fs_inode_blocks_init(fs, &child);
 
+
     r = luca_dir_add_entry(&inode_ref._ref, name, strlen(name), &child);
     if(r == EOK)
     {
@@ -764,8 +1258,10 @@ static int luca_dir_link(struct vnode *dvp, char *name, int type, uint32_t *link
             bool dir_index_on = false;
 #endif
             r = luca_dir_initialize(&inode_ref._ref, &child, dir_index_on);
+            printf("[lucafs] dir_initialize: %d\n", r);
             if(r != EOK)
             {
+                printf("[lucafs] dir_initialize failed\n");
                 luca_dir_remove_entry(&inode_ref._ref, name, strlen(name));
             }
         }

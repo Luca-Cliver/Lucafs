@@ -63,6 +63,7 @@ int luca_sb_write(luca_blockdev_t *bdev, luca_sblock_t *s)
         s->checksum = ext4_crc32c(EXT4_CRC32_INIT, s, offsetof(luca_sblock_t, checksum));
     }
 
+	printf("写入超级块\n");
     return luca_block_writebytes(bdev, LUCA_SUPERBLOCK_OFFSET, s, LUCA_SUPERBLOCK_SIZE);
 }
 
@@ -82,8 +83,9 @@ int luca_block_writebytes(luca_blockdev_t *bdev, uint64_t off,
 	uint32_t blen;
 	uint32_t unalg;
 	int r = EOK;
+	//printf("写入数据\n");
 
-	const uint8_t *p = (uint8_t *)buf;
+	uint8_t *p = (uint8_t *)buf;
 
 	ext4_assert(bdev && buf);
 
@@ -94,19 +96,23 @@ int luca_block_writebytes(luca_blockdev_t *bdev, uint64_t off,
 		return EINVAL; /*Ups. Out of range operation*/
 
 	block_idx = ((off + bdev->part_offset) / bdev->bdif->ph_bsize);
+	//printf("写入数据2\n");
 
 	/*OK lets deal with the first possible unaligned block*/
 	unalg = (off & (bdev->bdif->ph_bsize - 1));
 	if (unalg) {
+		//printf("写入数据2.1\n");
 
 		uint32_t wlen = (bdev->bdif->ph_bsize - unalg) > len
 				    ? len
 				    : (bdev->bdif->ph_bsize - unalg);
+		
 
 		// r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
         // blockdev_bwrite(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+		//printf("写入数据3\n");
 		r = bdev->bdif->bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
-        bdev->bdif->bwrite_ctr++;
+        bdev->bdif->bread_ctr++;
 		if (r != EOK)
 			return r;
 
@@ -126,12 +132,14 @@ int luca_block_writebytes(luca_blockdev_t *bdev, uint64_t off,
 	/*Aligned data*/
 	blen = len / bdev->bdif->ph_bsize;
 	if (blen != 0) {
+		//printf("写入数据4\n");
 		//r = ext4_bdif_bwrite(bdev, p, block_idx, blen);
         // blockdev_bwrite(bdev, p, block_idx, blen);
 		r = bdev->bdif->bwrite(bdev, p, block_idx, blen);
         bdev->bdif->bwrite_ctr++;
 		if (r != EOK)
 			return r;
+
 
 		p += bdev->bdif->ph_bsize * blen;
 		len -= bdev->bdif->ph_bsize * blen;
@@ -141,6 +149,7 @@ int luca_block_writebytes(luca_blockdev_t *bdev, uint64_t off,
 
 	/*Rest of the data*/
 	if (len) {
+		kprintf("剩余len:%d\n", len);
 		//r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
         // r = blockdev_bread(bdev, (void *)bdev->bdif->ph_bbuf, block_idx, 1);
         r = bdev->bdif->bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
@@ -165,10 +174,12 @@ int luca_block_writebytes(luca_blockdev_t *bdev, uint64_t off,
 int luca_block_readbytes(luca_blockdev_t *bdev, uint64_t off, void *buf,
 			 uint32_t len)
 {
+	kprintf("[luca_block_readbytes] off:%ld, len:%d\n", off, len);
 	uint64_t block_idx;
 	uint32_t blen;
 	uint32_t unalg;
 	int r = EOK;
+	cache_queue_t *data_cache_queue = bdev->data_cache_queue;
 
 	uint8_t *p = (uint8_t *)buf;
 
@@ -192,6 +203,25 @@ int luca_block_readbytes(luca_blockdev_t *bdev, uint64_t off, void *buf,
 
 		// r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
         //r = blockdev_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+
+
+		// cache_node *node = cache_find(block_idx, data_cache_queue);
+		// if(node)
+		// 	memcpy(p, node->cache.data + unalg, rlen);
+		// else
+		// {
+		// 	r = bdev->bdif->bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+        // 	bdev->bdif->bread_ctr++;
+		// 	if (r != EOK)
+		// 		return r;
+
+		// 	memcpy(p, bdev->bdif->ph_bbuf + unalg, rlen);
+		// 	cache_node *new_node = (cache_node *)ext4_malloc(sizeof(cache_node));
+		// 	new_node->cache.blk_id = block_idx;
+		// 	memcpy(new_node->cache.data, bdev->bdif->ph_bbuf, bdev->bdif->ph_bsize);
+		// 	cache_insert(data_cache_queue, new_node);
+
+		// }
 		r = bdev->bdif->bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
         bdev->bdif->bread_ctr++;
 		if (r != EOK)
@@ -208,8 +238,23 @@ int luca_block_readbytes(luca_blockdev_t *bdev, uint64_t off, void *buf,
 	blen = len / bdev->bdif->ph_bsize;
 
 	if (blen != 0) {
+		//printf("blen:%d\n", blen);
 		//r = ext4_bdif_bread(bdev, p, block_idx, blen);
         // r = blockdev_bread(bdev, p, block_idx, blen);
+
+		// for(int i = 0; i < blen; i++)
+		// {
+		// 	cache_node *node = cache_find(block_idx + i, data_cache_queue);
+		// 	if(node)
+		// 		memcpy(p + i*bdev->bdif->ph_bsize , node->cache.data, bdev->bdif->ph_bsize);
+		// 	else
+		// 	{
+		// 		node = cache_num_sectors(bdev, block_idx + i, 2*blen);
+		// 		memcpy(p + i*bdev->bdif->ph_bsize , node->cache.data, bdev->bdif->ph_bsize);
+		// 	}
+		// }
+
+
 		r = bdev->bdif->bread(bdev, p, block_idx, blen);
         bdev->bdif->bread_ctr++;
 		if (r != EOK)
@@ -223,8 +268,31 @@ int luca_block_readbytes(luca_blockdev_t *bdev, uint64_t off, void *buf,
 
 	/*Rest of the data*/
 	if (len) {
+		kprintf("剩余len:%d\n", len);
 		//r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
         // r = blockdev_bread(bdev, (void *)bdev->bdif->ph_bbuf, block_idx, 1);
+		//printf("cache最大块数是%d\n",data_cache_queue->max_size);
+
+
+		// cache_node *node = cache_find(block_idx, data_cache_queue);
+		// if(node)
+		// 	memcpy(p, node->cache.data, len);
+		// else
+		// {
+		// 	r = bdev->bdif->bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+		// 	bdev->bdif->bread_ctr++;
+		// 	if (r != EOK)
+		// 		return r;
+
+		// 	memcpy(p, bdev->bdif->ph_bbuf, len);
+		// 	//printf("从设备中捞到1\n");
+		// 	cache_node *new_node = (cache_node *)ext4_malloc(sizeof(cache_node));
+		// 	new_node->cache.blk_id = block_idx;
+		// 	//printf("从设备中捞到2\n");
+		// 	memcpy(new_node->cache.data, bdev->bdif->ph_bbuf, bdev->bdif->ph_bsize);
+		// 	//printf("从设备中捞到3\n");
+		// 	cache_insert(data_cache_queue, new_node);
+		// }
         r = bdev->bdif->bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
 		bdev->bdif->bread_ctr++;
 		if (r != EOK)
@@ -239,6 +307,7 @@ int luca_block_readbytes(luca_blockdev_t *bdev, uint64_t off, void *buf,
 int luca_block_get(luca_blockdev_t *bdev, struct luca_block *b,
 		   uint64_t lba)
 {
+	//kprintf("[luca_block_get] lba:%ld\n", lba);
 	bdev->fs->bcache_lock();
 	int r = luca_block_get_noread(bdev, b, lba);
 	if (r != EOK) {
@@ -268,6 +337,8 @@ int luca_block_get(luca_blockdev_t *bdev, struct luca_block *b,
 	return EOK;
 }
 
+
+
 int luca_block_set(luca_blockdev_t *bdev, struct luca_block *b)
 {
 	ext4_assert(bdev && b);
@@ -293,13 +364,14 @@ int luca_blocks_get_direct(luca_blockdev_t *bdev, void *buf, uint64_t lba,
 
 	pba = (lba * bdev->lg_bsize + bdev->part_offset) / bdev->bdif->ph_bsize;
 	pb_cnt = bdev->lg_bsize / bdev->bdif->ph_bsize;
+	int final_cnt = pb_cnt * cnt;
 
-    // int r = blockdev_bread(bdev, buf, pba, pb_cnt * cnt);
 	int r = bdev->bdif->bread(bdev, buf, pba, pb_cnt * cnt);
     bdev->bdif->bread_ctr++;
-    return r;
+    return EOK;
 	// return ext4_bdif_bread(bdev, buf, pba, pb_cnt * cnt);
 }
+
 
 /*直接写整个块*/
 int luca_blocks_set_direct(luca_blockdev_t *bdev, const void *buf,
@@ -943,7 +1015,7 @@ static int __luca_fs_get_inode_ref(luca_fs_t *fs, uint32_t index,
 
 	/* Load block group, where i-node is located */
 	luca_block_group_ref_t bg_ref;
-	kprintf("测试1block_group: %d\n", block_group);
+	//kprintf("测试1block_group: %d\n", block_group);
 
 	int rc = luca_fs_get_block_group_ref(fs, block_group, &bg_ref);
 	if (rc != EOK) {
@@ -960,7 +1032,7 @@ static int __luca_fs_get_inode_ref(luca_fs_t *fs, uint32_t index,
 		return rc;
 	}
 
-	kprintf("测试2\n");
+	//kprintf("测试2\n");
 
 	/* Compute position of i-node in the block group */
 	uint16_t inode_size = ext4_get16(&fs->sb, inode_size);
@@ -1878,6 +1950,7 @@ int luca_dir_dx_init(luca_inode_ref_t *dir, luca_inode_ref_t *parent)
 		entry_space -= sizeof(struct ext4_dir_idx_tail);
 
 	uint16_t root_limit = entry_space / sizeof(struct ext4_dir_idx_entry);
+	printf("root_limit: %d\n", root_limit);
 	ext4_dir_dx_climit_set_limit(climit, root_limit);
 
 	/* Append new block, where will be new entries inserted in the future */
@@ -2032,8 +2105,10 @@ static int luca_dir_dx_get_leaf(struct ext4_hash_info *hinfo,
 		uint16_t cnt = ext4_dir_dx_climit_get_count((ext4_dir_idx_climit *)entries);
 		
 		if ((cnt == 0) || (cnt > limit))
+		{
+			printf("cnt: %d limit: %d\n", cnt, limit);
 			return EXT4_ERR_BAD_DX_DIR;
-
+		}
 		/* Do binary search in every node */
 		p = entries + 1;
 		q = entries + cnt - 1;
@@ -2084,6 +2159,7 @@ static int luca_dir_dx_get_leaf(struct ext4_hash_info *hinfo,
 
 		if (limit != entry_space) {
 			luca_block_set(inode_ref->fs->bdev, tmp_blk);
+			printf("limit: %d entry_space: %d\n", limit, entry_space);
 			return EXT4_ERR_BAD_DX_DIR;
 		}
 
@@ -2184,8 +2260,10 @@ int luca_dir_dx_find_entry(luca_dir_search_result *result,
 	//rc = ext4_fs_get_inode_dblk_idx(inode_ref,  0, &root_block_addr, false);
 	rc = luca_fs_get_inode_dblk_idx_internal(inode_ref, 0, &root_block_addr, false, false);
 	if (rc != EOK)
+	{
+		printf("luca_fs_get_inode_dblk_idx_internal failed\n");
 		return rc;
-
+	}
 	luca_fs_t *fs = inode_ref->fs;
 
 	struct luca_block root_block;
@@ -2207,6 +2285,7 @@ int luca_dir_dx_find_entry(luca_dir_search_result *result,
 	rc = luca_dir_hinfo_init(&hinfo, &root_block, &fs->sb, name_len, name);
 	if (rc != EOK) {
 		luca_block_set(fs->bdev, &root_block);
+		printf("luca_dir_hinfo_init failed\n");
 		return EXT4_ERR_BAD_DX_DIR;
 	}
 
@@ -2218,10 +2297,12 @@ int luca_dir_dx_find_entry(luca_dir_search_result *result,
 	struct luca_dir_idx_block *dx_block;
 	struct luca_dir_idx_block *tmp;
 
+	// printf("luca_dir_dx_find_entry: hash: %x\n", hinfo.hash);
 	rc = luca_dir_dx_get_leaf(&hinfo, inode_ref, &root_block, &dx_block,
 				  dx_blocks);
 	if (rc != EOK) {
 		luca_block_set(fs->bdev, &root_block);
+		printf("luca_dir_dx_get_leaf failed\n");
 		return EXT4_ERR_BAD_DX_DIR;
 	}
 
@@ -2608,7 +2689,10 @@ luca_dir_dx_split_index(luca_inode_ref_t *ino_ref,
 			ext4_dir_dx_climit_set_count(right_climit, count_right);
 
 			if (meta_csum)
+			{
 				entry_space -= sizeof(struct ext4_dir_idx_tail);
+				node_limit = entry_space / sizeof(struct ext4_dir_idx_entry);
+			}
 
 			ext4_dir_dx_climit_set_limit(right_climit, node_limit);
 
@@ -2656,7 +2740,10 @@ luca_dir_dx_split_index(luca_inode_ref_t *ino_ref,
 
 			struct ext4_dir_idx_climit *new_climit = (ext4_dir_idx_climit *)new_en;
 			if (meta_csum)
+			{
 				entry_space -= sizeof(struct ext4_dir_idx_tail);
+				node_limit = entry_space / sizeof(struct ext4_dir_idx_entry);
+			}
 
 			ext4_dir_dx_climit_set_limit(new_climit, node_limit);
 
@@ -3153,6 +3240,7 @@ void luca_dir_write_entry(luca_sblock_t*sb, struct ext4_dir_en *en,
 	ext4_dir_en_set_name_len(sb, en, (uint16_t)name_len);
 
 	/* Write name */
+	// printf("luca_dir_write_entry name_len:%d %s\n", name_len, name);
 	memcpy(en->name, name, name_len);
 }
 
@@ -3183,6 +3271,7 @@ int luca_dir_add_entry(luca_inode_ref_t *parent, const char *name,
 	}
 #endif
 
+	// printf("luca_dir_add_entry: %s\n", name);
 	/* Linear algorithm */
 	uint32_t iblock = 0;
 	ext4_fsblk_t fblock = 0;
@@ -3255,6 +3344,8 @@ int luca_dir_add_entry(luca_inode_ref_t *parent, const char *name,
 				name_len);
 	}
 
+	printf("luca_dir_add_entry name:%s\n", blk_en->name);
+
 	luca_dir_set_csum(parent, (ext4_dir_en *)b.data);
 	//ext4_trans_set_block_dirty(b.buf);
 	luca_bcache_set_dirty(b.buf);
@@ -3276,12 +3367,19 @@ int luca_dir_find_entry(struct luca_dir_search_result *result,
 
 #if CONFIG_DIR_INDEX_ENABLE
 	/* Index search */
+	// printf("ext4_sb_feature_com(sb, EXT4_FCOM_DIR_INDEX) :%d", 
+	//  	ext4_sb_feature_com(sb, EXT4_FCOM_DIR_INDEX));
+	// printf("ext4_inode_has_flag(parent->inode, EXT4_INODE_FLAG_INDEX):%d\n",
+	// 	(to_le32(parent->inode->flags) & EXT4_INODE_FLAG_INDEX));
+
 	if ((ext4_sb_feature_com(sb, EXT4_FCOM_DIR_INDEX)) &&
 	    /*(ext4_inode_has_flag(parent->inode, EXT4_INODE_FLAG_INDEX)) &&*/
 		 (to_le32(parent->inode->flags) & EXT4_INODE_FLAG_INDEX)) {
+		// printf("luca_dir_index: %s\n", name);
 		r = luca_dir_dx_find_entry(result, parent, name_len, name);
 		/* Check if index is not corrupted */
 		if (r != EXT4_ERR_BAD_DX_DIR) {
+			// printf("不是坏的索引\n");
 			if (r != EOK)
 				return r;
 
@@ -3295,7 +3393,7 @@ int luca_dir_find_entry(struct luca_dir_search_result *result,
 #endif
 
 	/* Linear algorithm */
-
+	// printf("luca_dir_find_entry: %s\n", name);
 	uint32_t iblock;
 	ext4_fsblk_t fblock;
 	uint32_t block_size = ext4_sb_get_block_size(sb);
@@ -3407,6 +3505,7 @@ int luca_dir_try_insert_entry(luca_sblock_t *sb,
 			      luca_inode_ref_t *child, const char *name,
 			      uint32_t name_len)
 {
+	// printf("luca_dir_try_insert_entry: %s\n", name);
 	/* Compute required length entry and align it to 4 bytes */
 	uint32_t block_size = ext4_sb_get_block_size(sb);
 	uint16_t required_len = sizeof(struct ext4_fake_dir_entry) + name_len;
@@ -3430,6 +3529,7 @@ int luca_dir_try_insert_entry(luca_sblock_t *sb,
 		/* If invalid and large enough entry, use it */
 		if ((inode == 0) && (itype != EXT4_DIRENTRY_DIR_CSUM) &&
 		    (rec_len >= required_len)) {
+			// printf("luca_dir_try_insert_entry name1:%s\n", name);
 			luca_dir_write_entry(sb, start, rec_len, child, name,
 					     name_len);
 			luca_dir_set_csum(inode_ref, (ext4_dir_en *)dst_blk->data);
@@ -3455,12 +3555,13 @@ int luca_dir_try_insert_entry(luca_sblock_t *sb,
 			/* There is free space for new entry */
 			if (free_space >= required_len) {
 				/* Cut tail of current entry */
+				// printf("luca_dir_try_insert_entry name2:%s\n", name);
 				struct ext4_dir_en * new_entry;
 				new_entry = (ext4_dir_en *)((uint8_t *)start + sz);
 				ext4_dir_en_set_entry_len(start, sz);
 				luca_dir_write_entry(sb, new_entry, free_space,
 						     child, name, name_len);
-
+				// printf("new_entry name:%s\n", new_entry->name);
 				luca_dir_set_csum(inode_ref,
 						  (ext4_dir_en *)dst_blk->data);
 				// ext4_trans_set_block_dirty(dst_blk->buf);
@@ -4258,6 +4359,14 @@ void luca_fs_inode_blocks_init(luca_fs_t *fs,
 		return;
 	}
 
+// #if CONFIG_DIR_INDEX_ENABLE
+// 	/* Initialize directory index if needed */
+// 	if (ext4_sb_feature_incom(&fs->sb, EXT4_FCOM_DIR_INDEX)) {
+// 		luca_inode_set_flag(inode, EXT4_INODE_FLAG_INDEX);
+// 		// luca_dir_index_init(inode_ref);
+// 	}
+// #endif
+
 #if CONFIG_EXTENT_ENABLE && CONFIG_EXTENTS_ENABLE
 	/* Initialize extents if needed */
 	if (ext4_sb_feature_incom(&fs->sb, EXT4_FINCOM_EXTENTS)) {
@@ -4865,6 +4974,7 @@ int luca_fs_get_inode_dblk_idx_internal(luca_inode_ref_t *inode_ref,
 				       bool extent_create,
 				       bool support_unwritten __unused)
 {
+	kprintf("luca_fs_get_inode_dblk_idx_internal调用\n");
 	luca_fs_t *fs = inode_ref->fs;
 
 	/* For empty file is situation simple */
@@ -4881,6 +4991,7 @@ int luca_fs_get_inode_dblk_idx_internal(luca_inode_ref_t *inode_ref,
 	if ((ext4_sb_feature_incom(&fs->sb, EXT4_FINCOM_EXTENTS)) &&
 		(to_le32(inode_ref->inode->flags) & EXT4_INODE_FLAG_EXTENTS)) {
 
+		// printf("开启了extent\n");
 		uint64_t current_fsblk;
 		int rc = luca_extent_get_blocks(inode_ref, iblock, 1,
 				&current_fsblk, extent_create, NULL);
@@ -4895,6 +5006,7 @@ int luca_fs_get_inode_dblk_idx_internal(luca_inode_ref_t *inode_ref,
 	}
 #endif
 
+	printf("extent没找到\n");
 	struct luca_inode *inode = inode_ref->inode;
 
 	/* Direct block are read directly from array in i-node structure */

@@ -16,6 +16,8 @@
 #include <ext4_types.h>
 #include <ext4_hash.h>
 
+#include <unordered_map>
+
 
 
 struct luca_blockdev;
@@ -190,8 +192,63 @@ luca_bcache_remove_dirty_node(luca_bcache_t *bc, struct luca_buf *buf) {
 }
 
 
+struct data_cache{
+	uint64_t blk_id;
+	uint8_t data[4096];
+};
+
+struct cache_node{
+	struct data_cache cache;
+	struct cache_node *next;
+	struct cache_node *prev;
+	bool is_dirty;
+};
+
+typedef struct data_cache data_cache_t;
+typedef struct cache_node cache_node_t;
+
+typedef struct {
+    cache_node_t *nodes;
+    cache_node_t *free_list;
+} memory_pool_t;
 
 
+
+typedef struct cache_dirty_list{
+	struct cache_node *front;
+	struct cache_node *rear;
+	uint64_t size;
+	uint32_t upper;
+}cache_dirty_list_t;
+
+struct cache_queue{
+	struct cache_node *front;
+	struct cache_node *rear;
+	uint64_t size;
+	uint64_t max_size;	
+	cache_dirty_list_t *dirty_list;
+	memory_pool_t *pool;
+};
+
+typedef struct cache_queue cache_queue_t;
+
+int is_queue_empty(cache_queue_t *queue);
+
+int is_queue_full(cache_queue_t *queue);
+
+int write_back_num(luca_blockdev_t *bdev, int cnt, bool inending);
+
+int insert_dirty_list(luca_blockdev_t *bdev, cache_node_t *node);
+
+cache_node* node_to_replace(luca_blockdev_t *bdev);
+
+int cache_insert(luca_blockdev_t *bdev, cache_node *node);
+
+cache_node* cache_find(uint64_t lba, luca_blockdev_t *bdev);
+
+int cache_one_block(luca_blockdev_t *bdev, uint64_t lba, uint8_t *buffer);
+
+cache_node* cache_num_sectors_from_disk(luca_blockdev_t *bdev, uint64_t lba, uint32_t cnt);
 
 
 
@@ -205,6 +262,8 @@ struct luca_blockdev {
 	uint64_t lg_bcnt; //逻辑块数量
 	uint32_t cache_write_back; //缓存写回模式的引用计数器
 	struct luca_fs *fs; //所属的文件系统
+	struct cache_queue *data_cache_queue; //数据缓存队列
+	
 	void *journal; //日志系统，暂未实现
 };
 //typedef struct luca_blockdev luca_blockdev_t;
@@ -445,7 +504,7 @@ enum { LUCA_DE_UNKNOWN = 0,
 
 
 
-
+// #define CONFIG_DIR_INDEX_ENABLE 1
 
 struct luca_dir_idx_block {
 	struct luca_block b;
@@ -537,7 +596,10 @@ int luca_block_writebytes(luca_blockdev_t *bdev, uint64_t off,
 int luca_blocks_get_direct(luca_blockdev_t *bdev, void *buf, uint64_t lba,
 			   uint32_t cnt);
 
-int luca_blocks_set_direct(luca_blockdev_t *bdev, const void *buf,
+int luca_blocks_get_indirect(luca_blockdev_t *bdev, void *buf, uint64_t lba,
+			   uint32_t cnt);
+
+int luca_blocks_set_direct(luca_blockdev_t *bdev, const void* buf,
 			   uint64_t lba, uint32_t cnt);
 
 int luca_block_fini(luca_blockdev_t *bdev);
@@ -553,6 +615,8 @@ int luca_block_get(luca_blockdev_t *bdev, struct luca_block *b,
 		   uint64_t lba);
 
 int luca_block_set(luca_blockdev_t *bdev, struct luca_block *b);
+
+int luca_blocks_get(luca_blockdev_t *bdev, void *buf, uint64_t lba, uint32_t cnt);
 
 int luca_block_cache_flush(luca_blockdev_t *bdev);
 
