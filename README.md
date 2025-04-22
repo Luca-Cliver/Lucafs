@@ -1,4 +1,4 @@
-**课题是基于的OSv的实现设计的，文件系统在路径module/liblucafs下，启动的步骤与OSv的步骤一致，直接参考OSv的启动脚本，将原本的libext替换成liblucafs即可**
+**课题是基于的OSv的实现设计的，文件系统在路径modules/liblucafs下，启动的步骤与OSv的步骤一致，直接参考OSv的启动脚本，将原本的libext替换成liblucafs即可**
 
 ***OSv was originally designed and implemented by Cloudius Systems (now ScyllaDB) however
  currently, it is being maintained and enhanced by a small community of volunteers.
